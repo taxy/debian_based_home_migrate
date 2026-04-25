@@ -1,0 +1,39 @@
+# Compiled files
+*.o
+*.a
+*.so
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# Dependencies
+node_modules/
+venv/
+env/
+.venv/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.local
