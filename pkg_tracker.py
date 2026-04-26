@@ -22,6 +22,20 @@ def get_manual_packages() -> Set[str]:
         print(f"Error while querying apt: {e}", file=sys.stderr)
         sys.exit(1)
 
+def get_installed_packages() -> Set[str]:
+    """Get currently installed package names using dpkg-query."""
+    try:
+        result = subprocess.run(
+            ['dpkg-query', '-W', '-f=${Package}\n'],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return set(filter(None, result.stdout.split('\n')))
+    except subprocess.CalledProcessError as e:
+        print(f"Error while querying installed packages: {e}", file=sys.stderr)
+        sys.exit(1)
+
 def get_dependencies_data() -> Tuple[Set[str], Dict[str, Set[str]], Set[str]]:
     """
     Parse the dpkg status file and collect:
@@ -152,13 +166,30 @@ def find_recommend_circles(
     singles.sort()
     return circles, singles
 
-def print_recommend_circles(
-    recommends_deps: Dict[str, Set[str]],
-    clean_recommenders: Set[str]
-) -> None:
-    """Compute and display recommendation circles only for leaf packages."""
+def build_recommend_circle_data(
+    recommends_deps: Dict[str, Set[str]], clean_recommenders: Set[str]
+) -> Tuple[Set[str], List[List[str]], List[str]]:
+    """Build leaf set and connected circles derived from cleaned recommend data."""
     leaf_pkgs = leaf_recommended_packages(recommends_deps, clean_recommenders)
     circles, singles = find_recommend_circles(recommends_deps, leaf_pkgs)
+    return leaf_pkgs, circles, singles
+
+def collect_non_peak(
+    circle_data: Tuple[Set[str], List[List[str]], List[str]]) -> Set[str]:
+    """Collect non-peak packages from circles that contain at least one peak package."""
+    non_peak_packages: Set[str] = set()
+    leaf_pkgs, circles, singles = circle_data
+    for circle in circles:
+        non_peak_packages.update(set(circle) & leaf_pkgs)
+    non_peak_packages.update(singles)
+    return non_peak_packages
+
+def print_recommend_circles(
+    recommends_deps: Dict[str, Set[str]],
+    circle_data: Tuple[Set[str], List[List[str]], List[str]],
+) -> None:
+    """Compute and display recommendation circles only for leaf packages."""
+    leaf_pkgs, circles, singles = circle_data
 
 
     print("--- Recommend circles (leaf recommended packages only) ---")
@@ -192,8 +223,14 @@ def main():
     parser.add_argument(
         "--print-recommend-circles",
         action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show recommend circles in default listing mode.",
+    )
+    parser.add_argument(
+        "--filter-recommend-circles",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Show recommend circles in default listing mode (use --no-print-recommend-circles to hide).",
+        help="Filter recommend circles (use --no-filter-recommend-circles to disable).",
     )
     parser.add_argument("name", nargs="?", help="Snapshot name for plain diff mode.")
 
@@ -201,6 +238,10 @@ def main():
 
     # 1. Collect data
     manual_packages = get_manual_packages()
+    if args.base or args.diff or args.name:
+        installed_packages = get_installed_packages()
+    else:
+        installed_packages = None
     strict_deps, recommends_deps, recommender_packages = get_dependencies_data()
 
     # 2. Set operations
@@ -212,13 +253,19 @@ def main():
         if pkg not in strict_deps and (recommenders - strict_deps)
     }
     clean_recommended_targets = set(clean_recommends)
+    circle_data = None
+    if args.print_recommend_circles or args.filter_recommend_circles:
+        circle_data = build_recommend_circle_data(clean_recommends, clean_recommenders)
+    if args.filter_recommend_circles:
+        non_peak_from_circles = collect_non_peak(circle_data) # type: ignore
+        current_peak_packages -= non_peak_from_circles
 
     # --- LISTING (default mode) ---
     if not args.create and not args.diff and not args.base and not args.name:
         if args.print_recommend_circles:
             print_recommend_circles(
                 clean_recommends,
-                clean_recommenders,
+                circle_data, # type: ignore
             )
             print()
         print(f"--- Installed Peak packages ({len(current_peak_packages)} total) ---")
@@ -250,7 +297,7 @@ def main():
         combined_current = current_peak_packages | base_set
 
         new_pkgs = sorted(combined_current - target_set)
-        rem_pkgs = sorted(target_set - combined_current)
+        rem_pkgs = sorted(target_set - combined_current - installed_packages) # type: ignore
         print_changes_report(
             f"--- Changes since [{target_name}] (base noise filter: [{base_name}]) ---",
             new_pkgs,
@@ -267,7 +314,7 @@ def main():
             return
 
         new_pkgs = sorted(current_peak_packages - target_set)
-        rem_pkgs = sorted(target_set - current_peak_packages)
+        rem_pkgs = sorted(target_set - current_peak_packages - installed_packages) # type: ignore
         print_changes_report(
             f"--- Changes since [{target_name}] ---",
             new_pkgs,
