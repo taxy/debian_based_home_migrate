@@ -57,6 +57,32 @@ def format_pkg_output(pkg_name, recommended_set):
         return f"{COLOR_GREEN}{pkg_name}{COLOR_RESET}"
     return pkg_name
 
+def load_snapshot(snapshot_name):
+    """Load a snapshot file by name and return it as a set of package names."""
+    file_path = SNAPSHOT_DIR / f"{snapshot_name}.txt"
+    if not file_path.exists():
+        print(f"Error: No snapshot named '{snapshot_name}'. Looked in: '{SNAPSHOT_DIR}'", file=sys.stderr)
+        return None
+    with open(file_path, 'r') as f:
+        return set(f.read().splitlines())
+
+def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends, removed_label):
+    """Print a formatted package diff report used by both diff modes."""
+    print(header)
+    print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages were likely installed as recommendations.\n")
+
+    if new_pkgs:
+        print(f"New peak packages ({len(new_pkgs)}):")
+        for p in new_pkgs:
+            print(f"  + {format_pkg_output(p, clean_recommends)}")
+    if rem_pkgs:
+        print(f"\n{removed_label} ({len(rem_pkgs)}):")
+        for p in rem_pkgs:
+            print(f"  - {p}")
+
+    if not new_pkgs and not rem_pkgs:
+        print("No changes.")
+
 def main():
     parser = argparse.ArgumentParser(description="Linux package tracker and Peak analyzer tool.")
 
@@ -95,71 +121,42 @@ def main():
     # --- NOISE-FILTERED COMPARISON (base mode) ---
     elif args.base:
         base_name, target_name = args.base[0], args.base[1]
-        base_file = SNAPSHOT_DIR / f"{base_name}.txt"
-        target_file = SNAPSHOT_DIR / f"{target_name}.txt"
-
-        if not base_file.exists():
-            print(f"Error: No base snapshot named '{base_name}'. Looked in: '{SNAPSHOT_DIR}'", file=sys.stderr)
+        base_set = load_snapshot(base_name)
+        if base_set is None:
             return
-        if not target_file.exists():
-            print(f"Error: No target snapshot named '{target_name}'. Looked in: '{SNAPSHOT_DIR}'", file=sys.stderr)
+        target_set = load_snapshot(target_name)
+        if target_set is None:
             return
-
-        with open(base_file, 'r') as f:
-            base_set = set(f.read().splitlines())
-        with open(target_file, 'r') as f:
-            target_set = set(f.read().splitlines())
 
         # Union of current packages and previous base-system packages
         combined_current = current_peak_packages | base_set
 
         new_pkgs = sorted(combined_current - target_set)
         rem_pkgs = sorted(target_set - combined_current)
-
-        print(f"--- Changes since [{target_name}] (base noise filter: [{base_name}]) ---")
-        print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages were likely installed as recommendations.\n")
-
-        if new_pkgs:
-            print(f"New peak packages ({len(new_pkgs)}):")
-            for p in new_pkgs:
-                print(f"  + {format_pkg_output(p, clean_recommends)}")
-        if rem_pkgs:
-            print(f"\nMissing (removed) peak packages ({len(rem_pkgs)}):")
-            for p in rem_pkgs:
-                print(f"  - {p}")
-
-        if not new_pkgs and not rem_pkgs:
-            print("No changes.")
+        print_changes_report(
+            f"--- Changes since [{target_name}] (base noise filter: [{base_name}]) ---",
+            new_pkgs,
+            rem_pkgs,
+            clean_recommends,
+            "Missing (removed) peak packages",
+        )
 
     # --- PLAIN COMPARISON (diff mode) ---
     elif args.diff or args.name:
         target_name = args.diff if args.diff else args.name
-        file_path = SNAPSHOT_DIR / f"{target_name}.txt"
-
-        if not file_path.exists():
-            print(f"Error: No snapshot named '{target_name}'. Looked in: '{SNAPSHOT_DIR}'", file=sys.stderr)
+        target_set = load_snapshot(target_name)
+        if target_set is None:
             return
-
-        with open(file_path, 'r') as f:
-            target_set = set(f.read().splitlines())
 
         new_pkgs = sorted(current_peak_packages - target_set)
         rem_pkgs = sorted(target_set - current_peak_packages)
-
-        print(f"--- Changes since [{target_name}] ---")
-        print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages were likely installed as recommendations.\n")
-
-        if new_pkgs:
-            print(f"New peak packages ({len(new_pkgs)}):")
-            for p in new_pkgs:
-                print(f"  + {format_pkg_output(p, clean_recommends)}")
-        if rem_pkgs:
-            print(f"\nRemoved peak packages ({len(rem_pkgs)}):")
-            for p in rem_pkgs:
-                print(f"  - {p}")
-
-        if not new_pkgs and not rem_pkgs:
-            print("No changes.")
+        print_changes_report(
+            f"--- Changes since [{target_name}] ---",
+            new_pkgs,
+            rem_pkgs,
+            clean_recommends,
+            "Removed peak packages",
+        )
 
 if __name__ == "__main__":
     main()
