@@ -5,7 +5,7 @@ import subprocess
 import sys
 import re
 from collections import deque
-from typing import Set, Dict, Tuple, List
+from typing import Dict, Tuple, List, Iterable, Iterator, cast
 
 SNAPSHOT_DIR = pathlib.Path.home() / "package_snapshots"
 
@@ -13,16 +13,135 @@ SNAPSHOT_DIR = pathlib.Path.home() / "package_snapshots"
 COLOR_GREEN = '\033[92m'
 COLOR_RESET = '\033[0m'
 
-def get_manual_packages() -> Set[str]:
+# Global context for package name ↔ integer mapping
+class _PkgContext:
+    """Global registry mapping package names to integer IDs for fast set operations."""
+    def __init__(self):
+        self.name_to_id: Dict[str, int] = {}
+        self.id_to_name: Dict[int, str] = {}
+        self.next_id = 0
+    
+    def get_id(self, pkg_name: str) -> int:
+        """Get or create integer ID for package name."""
+        if pkg_name not in self.name_to_id:
+            self.name_to_id[pkg_name] = self.next_id
+            self.id_to_name[self.next_id] = pkg_name
+            self.next_id += 1
+        return self.name_to_id[pkg_name]
+    
+    def get_name(self, pkg_id: int) -> str:
+        """Get package name from integer ID."""
+        return self.id_to_name[pkg_id]
+
+_pkg_context = _PkgContext()
+
+class PkgSet:
+    """Set of package names using integer IDs internally for performance."""
+
+    def _update_from_iterable(self, iterable: Iterable[str | int]) -> None:
+        """Update from a homogeneous iterable of package IDs or names."""
+        iterator = iter(iterable)
+        try:
+            first = next(iterator)
+        except StopIteration:
+            return
+
+        if isinstance(first, int):
+            self._ids.add(first)
+            for item in cast(Iterable[int], iterator):
+                self._ids.add(item)
+            return
+
+        self._ids.add(_pkg_context.get_id(first))
+        for item in cast(Iterable[str], iterator):
+            self._ids.add(_pkg_context.get_id(item))
+    
+    def __init__(self, iterable: Iterable[str | int] | None = None):
+        self._ids: set[int] = set()
+        if iterable is None:
+            return
+        if isinstance(iterable, PkgSet):
+            self._ids = iterable._ids.copy()
+        else:
+            self._update_from_iterable(iterable)
+    
+    def add(self, pkg_name: str | int) -> None:
+        """Add a package to the set by name (str) or ID (int)."""
+        if isinstance(pkg_name, int):
+            self._ids.add(pkg_name)
+        else:
+            self._ids.add(_pkg_context.get_id(pkg_name))
+    
+    def update(self, iterable: Iterable[str | int] | set[int]) -> None:
+        """Update the set with multiple packages by name or ID."""
+        if isinstance(iterable, PkgSet):
+            self._ids.update(iterable._ids)
+        else:
+            self._update_from_iterable(iterable)
+    
+    def __contains__(self, pkg_name: str | int) -> bool:
+        """Check if package is in the set by name or ID."""
+        if isinstance(pkg_name, int):
+            return pkg_name in self._ids
+        if pkg_name not in _pkg_context.name_to_id:
+            return False
+        return _pkg_context.get_id(pkg_name) in self._ids
+    
+    def __iter__(self) -> Iterator[int]:
+        """Iterate over package IDs (integers)."""
+        return iter(self._ids)
+    
+    def names(self) -> Iterator[str]:
+        """Iterate over package names (strings)."""
+        return (_pkg_context.get_name(pkg_id) for pkg_id in self._ids)
+    
+    def __len__(self) -> int:
+        """Return number of packages in the set."""
+        return len(self._ids)
+    
+    def __sub__(self, other: 'PkgSet') -> 'PkgSet':
+        """Set difference: self - other."""
+        result = PkgSet()
+        result._ids = self._ids - other._ids
+        return result
+    
+    def __or__(self, other: 'PkgSet') -> 'PkgSet':
+        """Set union: self | other."""
+        result = PkgSet()
+        result._ids = self._ids | other._ids
+        return result
+    
+    def __and__(self, other: 'PkgSet') -> 'PkgSet':
+        """Set intersection: self & other."""
+        result = PkgSet()
+        result._ids = self._ids & other._ids
+        return result
+    
+    def __eq__(self, other: object) -> bool:
+        """Check equality with another PkgSet."""
+        if not isinstance(other, PkgSet):
+            return False
+        return self._ids == other._ids
+    
+    def __isub__(self, other: 'PkgSet') -> 'PkgSet':
+        """In-place set difference: self -= other."""
+        self._ids -= other._ids
+        return self
+    
+    def __repr__(self) -> str:
+        """String representation."""
+        return f"PkgSet({sorted(self.names())})"
+
+def get_manual_packages() -> PkgSet:
     """Get manually installed packages using apt-mark."""
     try:
         result = subprocess.run(['apt-mark', 'showmanual'], capture_output=True, text=True, check=True)
-        return set(filter(None, result.stdout.split('\n')))
+        return PkgSet(filter(None, result.stdout.split('\n')))
     except subprocess.CalledProcessError as e:
         print(f"Error while querying apt: {e}", file=sys.stderr)
         sys.exit(1)
 
-def get_installed_packages() -> Set[str]:
+def get_installed_packages() -> PkgSet:
     """Get currently installed package names using dpkg-query."""
     try:
         result = subprocess.run(
@@ -31,21 +150,21 @@ def get_installed_packages() -> Set[str]:
             text=True,
             check=True,
         )
-        return set(filter(None, result.stdout.split('\n')))
+        return PkgSet(filter(None, result.stdout.split('\n')))
     except subprocess.CalledProcessError as e:
         print(f"Error while querying installed packages: {e}", file=sys.stderr)
         sys.exit(1)
 
-def get_dependencies_data(installed_packages: Set[str]) -> Tuple[Set[str], Dict[str, Set[str]], Set[str]]:
+def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet]:
     """
     Parse the dpkg status file and collect:
     1. Strict dependencies (Depends, Pre-Depends)
     2. Recommended packages map: recommended package -> package that recommends it
     3. Recommender packages: package names that have a Recommends field
     """
-    strict_deps: Set[str] = set()
-    recommends_deps: Dict[str, Set[str]] = {}
-    recommender_packages: Set[str] = set()
+    strict_deps: PkgSet = PkgSet()
+    recommends_deps: Dict[int, PkgSet] = {}
+    recommender_packages: PkgSet = PkgSet()
     current_package: str | None = None
 
     try:
@@ -72,7 +191,7 @@ def get_dependencies_data(installed_packages: Set[str]) -> Tuple[Set[str], Dict[
                     for dep in re.split(r'[,|]', deps_str):
                         parts = dep.strip().split()
                         if parts and current_package:
-                            recommends_deps.setdefault(parts[0], set()).add(current_package)
+                            recommends_deps.setdefault(_pkg_context.get_id(parts[0]), PkgSet()).add(current_package)
 
     except FileNotFoundError:
         print("Error: Could not find /var/lib/dpkg/status.", file=sys.stderr)
@@ -86,13 +205,13 @@ def format_pkg_output(pkg_name, recommended_set):
     return pkg_name
 
 def load_snapshot(snapshot_name):
-    """Load a snapshot file by name and return it as a set of package names."""
+    """Load a snapshot file by name and return it as a PkgSet of package names."""
     file_path = SNAPSHOT_DIR / f"{snapshot_name}.txt"
     if not file_path.exists():
         print(f"Error: No snapshot named '{snapshot_name}'. Looked in: '{SNAPSHOT_DIR}'", file=sys.stderr)
         return None
     with open(file_path, 'r') as f:
-        return set(f.read().splitlines())
+        return PkgSet(f.read().splitlines())
 
 def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends, removed_label):
     """Print a formatted package diff report used by both diff modes."""
@@ -112,14 +231,14 @@ def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends, removed_l
         print("No changes.")
 
 def leaf_recommended_packages(
-    recommends_deps: Dict[str, Set[str]], recommender_packages: Set[str]
-) -> Set[str]:
+    recommends_deps: Dict[int, PkgSet], recommender_packages: PkgSet
+) -> PkgSet:
     """Keep only leaf recommended packages (recommended, but not recommenders)."""
-    return set(recommends_deps) - recommender_packages
+    return PkgSet(recommends_deps) - recommender_packages
 
 def find_recommend_circles(
-    recommends_deps: Dict[str, Set[str]], leaf_pkgs: Set[str]
-) -> Tuple[List[List[str]], List[str]]:
+    recommends_deps: Dict[int, PkgSet], leaf_pkgs: PkgSet
+) -> Tuple[List[PkgSet], PkgSet]:
     """
     Find connected circles among leaf packages.
 
@@ -127,70 +246,69 @@ def find_recommend_circles(
     and circles are connected components in this graph.
     """
     if not leaf_pkgs:
-        return [], []
+        return [], PkgSet()
 
-    recommender_to_leafs: Dict[str, Set[str]] = {}
-    for leaf in leaf_pkgs:
-        for recommender in recommends_deps.get(leaf, set()):
-            recommender_to_leafs.setdefault(recommender, set()).add(leaf)
+    recommender_to_leafs: Dict[int, PkgSet] = {}
+    for leaf_id in leaf_pkgs:
+        for recommender_id in recommends_deps.get(leaf_id, PkgSet()):
+            recommender_to_leafs.setdefault(recommender_id, PkgSet()).add(leaf_id)
 
-    adjacency: Dict[str, Set[str]] = {pkg: set() for pkg in leaf_pkgs}
-    for linked_leafs in recommender_to_leafs.values():
-        if len(linked_leafs) < 2:
+    adjacency: Dict[int, PkgSet] = {pkg_id: PkgSet() for pkg_id in leaf_pkgs}
+    for linked_leaf_ids in recommender_to_leafs.values():
+        if len(linked_leaf_ids) < 2:
             continue
-        for leaf in linked_leafs:
-            adjacency[leaf].update(linked_leafs - {leaf})
+        for leaf_id in linked_leaf_ids:
+            adjacency[leaf_id].update(linked_leaf_ids - PkgSet({leaf_id}))
 
-    visited: Set[str] = set()
-    circles: List[List[str]] = []
-    singles: List[str] = []
+    visited: PkgSet = PkgSet()
+    circles: List[PkgSet] = []
+    singles: PkgSet = PkgSet()
 
-    for root in sorted(leaf_pkgs):
-        if root in visited:
+    for leaf_id in leaf_pkgs:
+        if leaf_id in visited:
             continue
 
-        queue = deque([root])
-        component: List[str] = []
-        visited.add(root)
+        queue: deque[int] = deque([leaf_id])
+        component: PkgSet = PkgSet()
+        visited.add(leaf_id)
 
         while queue:
             cur = queue.popleft()
-            component.append(cur)
+            component.add(cur)
             for nxt in adjacency[cur]:
                 if nxt not in visited:
                     visited.add(nxt)
                     queue.append(nxt)
 
         if len(component) > 1:
-            circles.append(sorted(component))
+            circles.append(component)
         else:
-            singles.extend(component)
+            singles.update(component)
 
     circles.sort(key=len, reverse=True)
-    singles.sort()
     return circles, singles
 
 def build_recommend_circle_data(
-    recommends_deps: Dict[str, Set[str]], clean_recommenders: Set[str]
-) -> Tuple[Set[str], List[List[str]], List[str]]:
+    recommends_deps: Dict[int, PkgSet], clean_recommenders: PkgSet
+) -> Tuple[PkgSet, List[PkgSet], PkgSet]:
     """Build leaf set and connected circles derived from cleaned recommend data."""
     leaf_pkgs = leaf_recommended_packages(recommends_deps, clean_recommenders)
     circles, singles = find_recommend_circles(recommends_deps, leaf_pkgs)
     return leaf_pkgs, circles, singles
 
 def collect_non_peak(
-    circle_data: Tuple[Set[str], List[List[str]], List[str]]) -> Set[str]:
+    circle_data: Tuple[PkgSet, List[PkgSet], PkgSet]) -> PkgSet:
     """Collect non-peak packages from circles that contain at least one peak package."""
-    non_peak_packages: Set[str] = set()
+    non_peak_packages: PkgSet = PkgSet()
     leaf_pkgs, circles, singles = circle_data
     for circle in circles:
-        non_peak_packages.update(set(circle) & leaf_pkgs)
+        non_peak_packages.update(circle & leaf_pkgs)
     non_peak_packages.update(singles)
     return non_peak_packages
 
 def print_recommend_circles(
-    recommends_deps: Dict[str, Set[str]],
-    circle_data: Tuple[Set[str], List[List[str]], List[str]],
+    recommends_deps: Dict[int, PkgSet],
+    circle_data: Tuple[PkgSet, List[PkgSet], PkgSet],
 ) -> None:
     """Compute and display recommendation circles only for leaf packages."""
     leaf_pkgs, circles, singles = circle_data
@@ -205,15 +323,17 @@ def print_recommend_circles(
         print(f"Circles found: {len(circles)}")
         for idx, circle in enumerate(circles, start=1):
             print(f"\nCircle #{idx} ({len(circle)} leaf packages):")
-            for pkg in circle:
-                recommenders = sorted(recommends_deps.get(pkg, set()))
+            for pkg in sorted(circle.names()):
+                pkg_id = _pkg_context.get_id(pkg)
+                recommenders = sorted(recommends_deps.get(pkg_id, PkgSet()).names())
                 preview = ', '.join(recommenders[:4])
                 suffix = " ..." if len(recommenders) > 4 else ""
                 print(f"  - {pkg}  <-  [{preview}{suffix}]")
 
     if singles:
+        sorted_singles = sorted(singles.names())
         print(f"\nUnlinked leaf packages ({len(singles)}):")
-        for pkg in singles[:50]:
+        for pkg in sorted_singles[:50]:
             print(f"  - {pkg}")
         if len(singles) > 50:
             print(f"  ... and {len(singles) - 50} more")
@@ -249,11 +369,11 @@ def main():
     current_peak_packages = manual_packages - strict_deps
     clean_recommenders = recommender_packages - strict_deps
     clean_recommends = {
-        pkg: (recommenders - strict_deps)
-        for pkg, recommenders in recommends_deps.items()
-        if pkg not in strict_deps and (recommenders - strict_deps)
+        pkg_id: (recommenders - strict_deps)
+        for pkg_id, recommenders in recommends_deps.items()
+        if pkg_id not in strict_deps and (recommenders - strict_deps)
     }
-    clean_recommended_targets = set(clean_recommends)
+    clean_recommended_targets = PkgSet(clean_recommends)
     circle_data = None
     if args.print_recommend_circles or args.filter_recommend_circles:
         circle_data = build_recommend_circle_data(clean_recommends, clean_recommenders)
@@ -271,7 +391,7 @@ def main():
             print()
         print(f"--- Installed Peak packages ({len(current_peak_packages)} total) ---")
         print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages were likely installed as recommendations.\n")
-        for pkg in sorted(current_peak_packages):
+        for pkg in sorted(current_peak_packages.names()):
             print(f"  * {format_pkg_output(pkg, clean_recommended_targets)}")
         return
 
@@ -280,7 +400,7 @@ def main():
         SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
         file_path = SNAPSHOT_DIR / f"{args.create}.txt"
         with open(file_path, 'w') as f:
-            for pkg in sorted(current_peak_packages):
+            for pkg in sorted(current_peak_packages.names()):
                 f.write(f"{pkg}\n")
         print(f"Saved successfully: {len(current_peak_packages)} packages recorded ({file_path}).")
 
@@ -297,8 +417,10 @@ def main():
         # Union of current packages and previous base-system packages
         combined_current = current_peak_packages | base_set
 
-        new_pkgs = sorted(combined_current - target_set)
-        rem_pkgs = sorted(target_set - combined_current - installed_packages)
+        new_set = combined_current - target_set
+        rem_set = (target_set - combined_current) - installed_packages
+        new_pkgs = sorted(new_set.names())
+        rem_pkgs = sorted(rem_set.names())
         print_changes_report(
             f"--- Changes since [{target_name}] (base noise filter: [{base_name}]) ---",
             new_pkgs,
@@ -314,8 +436,10 @@ def main():
         if target_set is None:
             return
 
-        new_pkgs = sorted(current_peak_packages - target_set)
-        rem_pkgs = sorted(target_set - current_peak_packages - installed_packages)
+        new_set = current_peak_packages - target_set
+        rem_set = (target_set - current_peak_packages) - installed_packages
+        new_pkgs = sorted(new_set.names())
+        rem_pkgs = sorted(rem_set.names())
         print_changes_report(
             f"--- Changes since [{target_name}] ---",
             new_pkgs,
