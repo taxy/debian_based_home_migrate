@@ -136,7 +136,9 @@ def get_manual_packages() -> PkgSet:
     """Get manually installed packages using apt-mark."""
     try:
         result = subprocess.run(['apt-mark', 'showmanual'], capture_output=True, text=True, check=True)
-        return PkgSet(filter(None, result.stdout.split('\n')))
+        lines = result.stdout.splitlines()
+        cleaned_packages = {line.split(':')[0] for line in lines if line.strip()}
+        return PkgSet(cleaned_packages)
     except subprocess.CalledProcessError as e:
         print(f"Error while querying apt: {e}", file=sys.stderr)
         sys.exit(1)
@@ -339,24 +341,45 @@ def print_recommend_circles(
             print(f"  ... and {len(singles) - 50} more")
 
 def main():
-    parser = argparse.ArgumentParser(description="Linux package tracker and Peak analyzer tool.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Track manually installed (peak) packages, create snapshots, and compare package state over time."
+        )
+    )
 
-    parser.add_argument("--create", metavar="NAME", help="Create a new snapshot with the given name.")
-    parser.add_argument("--diff", metavar="NAME", help="Compare against a previous snapshot.")
-    parser.add_argument("--base", nargs=2, metavar=("BASE_NAME", "TARGET_NAME"), help="Noise-filtered comparison: subtract base system packages.")
+    parser.add_argument(
+        "--create",
+        metavar="NAME",
+        help="Save the current peak package set as snapshot NAME.",
+    )
+    parser.add_argument(
+        "--diff",
+        metavar="NAME",
+        help="Compare the current system against snapshot NAME.",
+    )
+    parser.add_argument(
+        "--base",
+        nargs=2,
+        metavar=("BASE_NAME", "TARGET_NAME"),
+        help="Compare current system against TARGET_NAME while ignoring packages present in BASE_NAME.",
+    )
     parser.add_argument(
         "--print-recommend-circles",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Show recommend circles in default listing mode.",
+        help="In default listing mode, also print connected recommendation groups.",
     )
     parser.add_argument(
         "--filter-recommend-circles",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Filter recommend circles (use --no-filter-recommend-circles to disable).",
+        help="Exclude packages that belong to recommendation circles (disable with --no-filter-recommend-circles).",
     )
-    parser.add_argument("name", nargs="?", help="Snapshot name for plain diff mode.")
+    parser.add_argument(
+        "name",
+        nargs="?",
+        help="Optional snapshot name for plain diff mode (same as --diff NAME).",
+    )
 
     args = parser.parse_args()
 
@@ -414,15 +437,13 @@ def main():
         if target_set is None:
             return
 
-        # Union of current packages and previous base-system packages
-        combined_current = current_peak_packages | base_set
-
-        new_set = combined_current - target_set
-        rem_set = (target_set - combined_current) - installed_packages
+  
+        new_set = current_peak_packages - target_set
+        rem_set = (target_set - base_set) - installed_packages
         new_pkgs = sorted(new_set.names())
         rem_pkgs = sorted(rem_set.names())
         print_changes_report(
-            f"--- Changes since [{target_name}] (base noise filter: [{base_name}]) ---",
+            f"--- Changes since [{target_name}] (base system filter: [{base_name}]) ---",
             new_pkgs,
             rem_pkgs,
             clean_recommended_targets,
@@ -437,7 +458,7 @@ def main():
             return
 
         new_set = current_peak_packages - target_set
-        rem_set = (target_set - current_peak_packages) - installed_packages
+        rem_set = target_set - installed_packages
         new_pkgs = sorted(new_set.names())
         rem_pkgs = sorted(rem_set.names())
         print_changes_report(
