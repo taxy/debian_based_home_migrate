@@ -4,6 +4,8 @@ import pathlib
 import subprocess
 import sys
 import re
+from collections import deque
+from typing import Set, Dict, Tuple, List
 
 SNAPSHOT_DIR = pathlib.Path.home() / "package_snapshots"
 
@@ -11,7 +13,7 @@ SNAPSHOT_DIR = pathlib.Path.home() / "package_snapshots"
 COLOR_GREEN = '\033[92m'
 COLOR_RESET = '\033[0m'
 
-def get_manual_packages():
+def get_manual_packages() -> Set[str]:
     """Get manually installed packages using apt-mark."""
     try:
         result = subprocess.run(['apt-mark', 'showmanual'], capture_output=True, text=True, check=True)
@@ -20,19 +22,25 @@ def get_manual_packages():
         print(f"Error while querying apt: {e}", file=sys.stderr)
         sys.exit(1)
 
-def get_dependencies_data():
+def get_dependencies_data() -> Tuple[Set[str], Dict[str, Set[str]], Set[str]]:
     """
-    Parse the dpkg status file and collect two separate sets:
+    Parse the dpkg status file and collect:
     1. Strict dependencies (Depends, Pre-Depends)
-    2. Recommended packages (Recommends)
+    2. Recommended packages map: recommended package -> package that recommends it
+    3. Recommender packages: package names that have a Recommends field
     """
-    strict_deps = set()
-    recommends_deps = set()
+    strict_deps: Set[str] = set()
+    recommends_deps: Dict[str, Set[str]] = {}
+    recommender_packages: Set[str] = set()
+    current_package: str | None = None
 
     try:
         with open('/var/lib/dpkg/status', 'r', encoding='utf-8') as f:
             for line in f:
-                if line.startswith(('Depends:', 'Pre-Depends:')):
+                if line.startswith('Package:'):
+                    current_package = line.split(':', 1)[1].strip()
+
+                elif line.startswith(('Depends:', 'Pre-Depends:')):
                     deps_str = line.split(':', 1)[1]
                     for dep in re.split(r'[,|]', deps_str):
                         parts = dep.strip().split()
@@ -40,16 +48,18 @@ def get_dependencies_data():
                             strict_deps.add(parts[0])
 
                 elif line.startswith('Recommends:'):
+                    if current_package:
+                        recommender_packages.add(current_package)
                     deps_str = line.split(':', 1)[1]
                     for dep in re.split(r'[,|]', deps_str):
                         parts = dep.strip().split()
-                        if parts:
-                            recommends_deps.add(parts[0])
+                        if parts and current_package:
+                            recommends_deps.setdefault(parts[0], set()).add(current_package)
 
     except FileNotFoundError:
         print("Error: Could not find /var/lib/dpkg/status.", file=sys.stderr)
 
-    return strict_deps, recommends_deps
+    return strict_deps, recommends_deps, recommender_packages
 
 def format_pkg_output(pkg_name, recommended_set):
     """Color the package name green if it is in the recommended set."""
@@ -83,30 +93,138 @@ def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends, removed_l
     if not new_pkgs and not rem_pkgs:
         print("No changes.")
 
+def leaf_recommended_packages(
+    recommends_deps: Dict[str, Set[str]], recommender_packages: Set[str]
+) -> Set[str]:
+    """Keep only leaf recommended packages (recommended, but not recommenders)."""
+    return set(recommends_deps) - recommender_packages
+
+def find_recommend_circles(
+    recommends_deps: Dict[str, Set[str]], leaf_pkgs: Set[str]
+) -> Tuple[List[List[str]], List[str]]:
+    """
+    Find connected circles among leaf packages.
+
+    Two leaf packages are connected when they share at least one recommender,
+    and circles are connected components in this graph.
+    """
+    if not leaf_pkgs:
+        return [], []
+
+    recommender_to_leafs: Dict[str, Set[str]] = {}
+    for leaf in leaf_pkgs:
+        for recommender in recommends_deps.get(leaf, set()):
+            recommender_to_leafs.setdefault(recommender, set()).add(leaf)
+
+    adjacency: Dict[str, Set[str]] = {pkg: set() for pkg in leaf_pkgs}
+    for linked_leafs in recommender_to_leafs.values():
+        if len(linked_leafs) < 2:
+            continue
+        for leaf in linked_leafs:
+            adjacency[leaf].update(linked_leafs - {leaf})
+
+    visited: Set[str] = set()
+    circles: List[List[str]] = []
+    singles: List[str] = []
+
+    for root in sorted(leaf_pkgs):
+        if root in visited:
+            continue
+
+        queue = deque([root])
+        component: List[str] = []
+        visited.add(root)
+
+        while queue:
+            cur = queue.popleft()
+            component.append(cur)
+            for nxt in adjacency[cur]:
+                if nxt not in visited:
+                    visited.add(nxt)
+                    queue.append(nxt)
+
+        if len(component) > 1:
+            circles.append(sorted(component))
+        else:
+            singles.extend(component)
+
+    circles.sort(key=len, reverse=True)
+    singles.sort()
+    return circles, singles
+
+def print_recommend_circles(
+    recommends_deps: Dict[str, Set[str]],
+    clean_recommenders: Set[str]
+) -> None:
+    """Compute and display recommendation circles only for leaf packages."""
+    leaf_pkgs = leaf_recommended_packages(recommends_deps, clean_recommenders)
+    circles, singles = find_recommend_circles(recommends_deps, leaf_pkgs)
+
+
+    print("--- Recommend circles (leaf recommended packages only) ---")
+    print(f"Leaf set size: {len(leaf_pkgs)}")
+
+    if not circles:
+        print("No circles found.")
+    else:
+        print(f"Circles found: {len(circles)}")
+        for idx, circle in enumerate(circles, start=1):
+            print(f"\nCircle #{idx} ({len(circle)} leaf packages):")
+            for pkg in circle:
+                recommenders = sorted(recommends_deps.get(pkg, set()))
+                preview = ', '.join(recommenders[:4])
+                suffix = " ..." if len(recommenders) > 4 else ""
+                print(f"  - {pkg}  <-  [{preview}{suffix}]")
+
+    if singles:
+        print(f"\nUnlinked leaf packages ({len(singles)}):")
+        for pkg in singles[:50]:
+            print(f"  - {pkg}")
+        if len(singles) > 50:
+            print(f"  ... and {len(singles) - 50} more")
+
 def main():
     parser = argparse.ArgumentParser(description="Linux package tracker and Peak analyzer tool.")
 
     parser.add_argument("--create", metavar="NAME", help="Create a new snapshot with the given name.")
     parser.add_argument("--diff", metavar="NAME", help="Compare against a previous snapshot.")
     parser.add_argument("--base", nargs=2, metavar=("BASE_NAME", "TARGET_NAME"), help="Noise-filtered comparison: subtract base system packages.")
+    parser.add_argument(
+        "--print-recommend-circles",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show recommend circles in default listing mode (use --no-print-recommend-circles to hide).",
+    )
     parser.add_argument("name", nargs="?", help="Snapshot name for plain diff mode.")
 
     args = parser.parse_args()
 
     # 1. Collect data
     manual_packages = get_manual_packages()
-    strict_deps, recommends_deps = get_dependencies_data()
+    strict_deps, recommends_deps, recommender_packages = get_dependencies_data()
 
     # 2. Set operations
     current_peak_packages = manual_packages - strict_deps
-    clean_recommends = recommends_deps - strict_deps
+    clean_recommenders = recommender_packages - strict_deps
+    clean_recommends = {
+        pkg: (recommenders - strict_deps)
+        for pkg, recommenders in recommends_deps.items()
+        if pkg not in strict_deps and (recommenders - strict_deps)
+    }
+    clean_recommended_targets = set(clean_recommends)
 
     # --- LISTING (default mode) ---
     if not args.create and not args.diff and not args.base and not args.name:
+        if args.print_recommend_circles:
+            print_recommend_circles(
+                clean_recommends,
+                clean_recommenders,
+            )
+            print()
         print(f"--- Installed Peak packages ({len(current_peak_packages)} total) ---")
         print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages were likely installed as recommendations.\n")
         for pkg in sorted(current_peak_packages):
-            print(f"  * {format_pkg_output(pkg, clean_recommends)}")
+            print(f"  * {format_pkg_output(pkg, clean_recommended_targets)}")
         return
 
     # --- SAVE SNAPSHOT ---
@@ -137,7 +255,7 @@ def main():
             f"--- Changes since [{target_name}] (base noise filter: [{base_name}]) ---",
             new_pkgs,
             rem_pkgs,
-            clean_recommends,
+            clean_recommended_targets,
             "Missing (removed) peak packages",
         )
 
@@ -154,7 +272,7 @@ def main():
             f"--- Changes since [{target_name}] ---",
             new_pkgs,
             rem_pkgs,
-            clean_recommends,
+            clean_recommended_targets,
             "Removed peak packages",
         )
 
