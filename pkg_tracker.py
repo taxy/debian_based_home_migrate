@@ -36,7 +36,7 @@ def get_installed_packages() -> Set[str]:
         print(f"Error while querying installed packages: {e}", file=sys.stderr)
         sys.exit(1)
 
-def get_dependencies_data() -> Tuple[Set[str], Dict[str, Set[str]], Set[str]]:
+def get_dependencies_data(installed_packages: Set[str]) -> Tuple[Set[str], Dict[str, Set[str]], Set[str]]:
     """
     Parse the dpkg status file and collect:
     1. Strict dependencies (Depends, Pre-Depends)
@@ -56,10 +56,14 @@ def get_dependencies_data() -> Tuple[Set[str], Dict[str, Set[str]], Set[str]]:
 
                 elif line.startswith(('Depends:', 'Pre-Depends:')):
                     deps_str = line.split(':', 1)[1]
-                    for dep in re.split(r'[,|]', deps_str):
-                        parts = dep.strip().split()
-                        if parts:
-                            strict_deps.add(parts[0])
+                    for dep_group in deps_str.split(','):
+                        alternatives = []
+                        for dep in dep_group.split('|'):
+                            parts = dep.strip().split()
+                            if parts:
+                                alternatives.append(parts[0])
+                        if all(pkg in installed_packages for pkg in alternatives):
+                            strict_deps.update(alternatives)
 
                 elif line.startswith('Recommends:'):
                     if current_package:
@@ -238,11 +242,8 @@ def main():
 
     # 1. Collect data
     manual_packages = get_manual_packages()
-    if args.base or args.diff or args.name:
-        installed_packages = get_installed_packages()
-    else:
-        installed_packages = None
-    strict_deps, recommends_deps, recommender_packages = get_dependencies_data()
+    installed_packages = get_installed_packages()
+    strict_deps, recommends_deps, recommender_packages = get_dependencies_data(installed_packages)
 
     # 2. Set operations
     current_peak_packages = manual_packages - strict_deps
@@ -297,7 +298,7 @@ def main():
         combined_current = current_peak_packages | base_set
 
         new_pkgs = sorted(combined_current - target_set)
-        rem_pkgs = sorted(target_set - combined_current - installed_packages) # type: ignore
+        rem_pkgs = sorted(target_set - combined_current - installed_packages)
         print_changes_report(
             f"--- Changes since [{target_name}] (base noise filter: [{base_name}]) ---",
             new_pkgs,
@@ -314,7 +315,7 @@ def main():
             return
 
         new_pkgs = sorted(current_peak_packages - target_set)
-        rem_pkgs = sorted(target_set - current_peak_packages - installed_packages) # type: ignore
+        rem_pkgs = sorted(target_set - current_peak_packages - installed_packages)
         print_changes_report(
             f"--- Changes since [{target_name}] ---",
             new_pkgs,
