@@ -157,16 +157,18 @@ def get_installed_packages() -> PkgSet:
         print(f"Error while querying installed packages: {e}", file=sys.stderr)
         sys.exit(1)
 
-def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet]:
+def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, PkgSet]:
     """
     Parse the dpkg status file and collect:
     1. Strict dependencies (Depends, Pre-Depends)
     2. Recommended packages map: recommended package -> package that recommends it
     3. Recommender packages: package names that have a Recommends field
+    4. System packages: Essential: yes or Priority: required/important
     """
     strict_deps: PkgSet = PkgSet()
     recommends_deps: Dict[int, PkgSet] = {}
     recommender_packages: PkgSet = PkgSet()
+    system_packages: PkgSet = PkgSet()
     current_package: str | None = None
 
     try:
@@ -195,10 +197,18 @@ def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int,
                         if parts and current_package:
                             recommends_deps.setdefault(_pkg_context.get_id(parts[0]), PkgSet()).add(current_package)
 
+                elif line.startswith('Essential:'):
+                    if current_package and line.split(':', 1)[1].strip() == 'yes':
+                        system_packages.add(current_package)
+
+                elif line.startswith('Priority:'):
+                    if current_package and line.split(':', 1)[1].strip() in ('required', 'important'):
+                        system_packages.add(current_package)
+
     except FileNotFoundError:
         print("Error: Could not find /var/lib/dpkg/status.", file=sys.stderr)
 
-    return strict_deps, recommends_deps, recommender_packages
+    return strict_deps, recommends_deps, recommender_packages, system_packages
 
 def format_pkg_output(pkg_name, recommended_set):
     """Color the package name green if it is in the recommended set."""
@@ -425,10 +435,10 @@ def main():
     # 1. Collect data
     manual_packages = get_manual_packages()
     installed_packages = get_installed_packages()
-    strict_deps, recommends_deps, recommender_packages = get_dependencies_data(installed_packages)
+    strict_deps, recommends_deps, recommender_packages, system_packages = get_dependencies_data(installed_packages)
 
     # 2. Set operations
-    current_peak_packages = manual_packages - strict_deps
+    current_peak_packages = manual_packages - strict_deps - system_packages
     clean_recommenders = recommender_packages - strict_deps
     clean_recommends = {
         pkg_id: (recommenders - strict_deps)
