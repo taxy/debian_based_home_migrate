@@ -155,7 +155,7 @@ def get_manual_packages() -> PkgSet:
     try:
         result = subprocess.run(['apt-mark', 'showmanual'], capture_output=True, text=True, check=True)
         lines = result.stdout.splitlines()
-        cleaned_packages = {line.split(':')[0] for line in lines if line.strip()}
+        cleaned_packages = {line.partition(':')[0] for line in lines if line.strip()}
         return PkgSet(cleaned_packages)
     except subprocess.CalledProcessError as e:
         print(f"Error while querying apt: {e}", file=sys.stderr)
@@ -242,11 +242,16 @@ def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int,
 
     return strict_deps, recommends_deps, recommender_packages, system_packages
 
-def format_pkg_output(pkg_name, recommended_set):
-    """Color the package name green if it is in the recommended set."""
-    if pkg_name in recommended_set:
-        return f"{COLOR_GREEN}{pkg_name}{COLOR_RESET}"
-    return pkg_name
+def format_pkg_output(pkg_name: str, clean_recommends: Dict[int, PkgSet]) -> str:
+    """Color the package name green and list its recommenders if it is recommended."""
+    pkg_id = _pkg_context.name_to_id.get(pkg_name)
+    if pkg_id is None:
+        return pkg_name
+    recommenders = clean_recommends.get(pkg_id)
+    if not recommenders:
+        return pkg_name
+    recommender_list = ', '.join(sorted(recommenders.names()))
+    return f"{COLOR_GREEN}{pkg_name}{COLOR_RESET}  <-  [{recommender_list}]"
 
 def load_snapshot(snapshot_name):
     """Load a snapshot file by name and return it as a PkgSet of package names."""
@@ -261,7 +266,7 @@ def print_legend() -> None:
     """Print the color legend for package output."""
     print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages recommended by other packages.\n")
 
-def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends, removed_label):
+def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends: Dict[int, PkgSet], removed_label):
     """Print a formatted package diff report used by both diff modes."""
     print(header)
     print_legend()
@@ -471,13 +476,8 @@ def main():
 
     # 2. Set operations
     current_peak_packages = manual_packages - strict_deps - system_packages
-    clean_recommenders = recommender_packages - strict_deps
-    clean_recommends = {
-        pkg_id: (recommenders - strict_deps)
-        for pkg_id, recommenders in recommends_deps.items()
-        if pkg_id not in strict_deps and (recommenders - strict_deps)
-    }
-    clean_recommended_targets = PkgSet(clean_recommends)
+    clean_recommenders = recommender_packages - strict_deps - system_packages
+    clean_recommends = recommends_deps
     if args.filter_non_peak_recommended:
         non_peak_recommends = collect_non_peak_recommended(clean_recommends, clean_recommenders)
         current_peak_packages -= non_peak_recommends
@@ -494,7 +494,7 @@ def main():
         print(f"--- Installed Peak packages ({len(current_peak_packages)} total) ---")
         print_legend()
         for pkg in sorted(current_peak_packages.names()):
-            print(f"  * {format_pkg_output(pkg, clean_recommended_targets)}")
+            print(f"  * {format_pkg_output(pkg, clean_recommends)}")
         return
 
     # --- SAVE SNAPSHOT ---
@@ -525,7 +525,7 @@ def main():
             f"--- Changes since [{target_name}] (base system filter: [{base_name}]) ---",
             new_pkgs,
             rem_pkgs,
-            clean_recommended_targets,
+            clean_recommends,
             "Missing (removed) peak packages",
         )
 
@@ -544,7 +544,7 @@ def main():
             f"--- Changes since [{target_name}] ---",
             new_pkgs,
             rem_pkgs,
-            clean_recommended_targets,
+            clean_recommends,
             "Removed peak packages",
         )
 
