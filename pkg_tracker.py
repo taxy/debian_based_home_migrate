@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import enum
 import pathlib
 import subprocess
 import sys
@@ -8,6 +9,23 @@ from collections import deque
 from typing import Dict, Tuple, List, Iterable, Iterator, cast
 
 SNAPSHOT_DIR = pathlib.Path.home() / "package_snapshots"
+
+class _StatusField(enum.IntEnum):
+    PACKAGE     = 0
+    DEPENDS     = 1
+    PRE_DEPENDS = 2
+    RECOMMENDS  = 3
+    ESSENTIAL   = 4
+    PRIORITY    = 5
+
+_STATUS_FIELD_MAP: Dict[str, _StatusField] = {
+    'Package':     _StatusField.PACKAGE,
+    'Depends':     _StatusField.DEPENDS,
+    'Pre-Depends': _StatusField.PRE_DEPENDS,
+    'Recommends':  _StatusField.RECOMMENDS,
+    'Essential':   _StatusField.ESSENTIAL,
+    'Priority':    _StatusField.PRIORITY,
+}
 
 # ANSI color codes for terminal formatting
 COLOR_GREEN = '\033[92m'
@@ -174,35 +192,49 @@ def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int,
     try:
         with open('/var/lib/dpkg/status', 'r', encoding='utf-8') as f:
             for line in f:
-                if line.startswith('Package:'):
-                    current_package = line.split(':', 1)[1].strip()
+                key, sep, value = line.partition(':')
+                if not sep:
+                    continue
+                field = _STATUS_FIELD_MAP.get(key)
+                if field is None:
+                    continue
+                value = value.strip()
 
-                elif line.startswith(('Depends:', 'Pre-Depends:')):
-                    deps_str = line.split(':', 1)[1]
-                    for dep_group in deps_str.split(','):
-                        alternatives = []
-                        for dep in dep_group.split('|'):
-                            parts = dep.strip().split()
-                            if parts:
-                                alternatives.append(parts[0])
-                        if all(pkg in installed_packages for pkg in alternatives):
-                            strict_deps.update(alternatives)
+                if field is _StatusField.PACKAGE:
+                    current_package = value
 
-                elif line.startswith('Recommends:'):
-                    if current_package:
-                        recommender_packages.add(current_package)
-                    deps_str = line.split(':', 1)[1]
-                    for dep in re.split(r'[,|]', deps_str):
-                        parts = dep.strip().split()
-                        if parts and current_package:
-                            recommends_deps.setdefault(_pkg_context.get_id(parts[0]), PkgSet()).add(current_package)
+                elif field is _StatusField.DEPENDS or field is _StatusField.PRE_DEPENDS:
+                    for dep_group in value.split(','):
+                        dep_group = dep_group.strip()
+                        if not dep_group:
+                            continue
 
-                elif line.startswith('Essential:'):
-                    if current_package and line.split(':', 1)[1].strip() == 'yes':
+                        dep_alternatives = dep_group.split('|')
+                        if len(dep_alternatives) == 1:
+                            strict_deps.add(dep_group.partition(' ')[0])
+                        else:
+                            alternatives = tuple(
+                                dep.strip().partition(' ')[0]
+                                for dep in dep_alternatives
+                            )
+                            if all(pkg in installed_packages for pkg in alternatives):
+                                strict_deps.update(alternatives)
+
+                elif field is _StatusField.RECOMMENDS:
+                    recommender_packages.add(current_package)
+                    for dep in re.split(r'[,|]', value):
+                        dep = dep.strip()
+                        if not dep:
+                            continue
+                        name = dep.partition(' ')[0]
+                        recommends_deps.setdefault(_pkg_context.get_id(name), PkgSet()).add(current_package)
+
+                elif field is _StatusField.ESSENTIAL:
+                    if value == 'yes':
                         system_packages.add(current_package)
 
-                elif line.startswith('Priority:'):
-                    if current_package and line.split(':', 1)[1].strip() in ('required', 'important'):
+                elif field is _StatusField.PRIORITY:
+                    if value in ('required', 'important'):
                         system_packages.add(current_package)
 
     except FileNotFoundError:
