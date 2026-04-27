@@ -15,20 +15,24 @@ class _StatusField(enum.IntEnum):
     DEPENDS     = 1
     PRE_DEPENDS = 2
     RECOMMENDS  = 3
-    ESSENTIAL   = 4
-    PRIORITY    = 5
+    SUGGESTS    = 4
+    ESSENTIAL   = 5
+    PRIORITY    = 6
 
 _STATUS_FIELD_MAP: Dict[str, _StatusField] = {
     'Package':     _StatusField.PACKAGE,
     'Depends':     _StatusField.DEPENDS,
     'Pre-Depends': _StatusField.PRE_DEPENDS,
     'Recommends':  _StatusField.RECOMMENDS,
+    'Suggests':    _StatusField.SUGGESTS,
     'Essential':   _StatusField.ESSENTIAL,
     'Priority':    _StatusField.PRIORITY,
 }
 
 # ANSI color codes for terminal formatting
 COLOR_GREEN = '\033[92m'
+COLOR_RED = '\033[91m'
+COLOR_YELLOW = '\033[93m'
 COLOR_RESET = '\033[0m'
 
 # Global context for package name ↔ integer mapping
@@ -175,18 +179,22 @@ def get_installed_packages() -> PkgSet:
         print(f"Error while querying installed packages: {e}", file=sys.stderr)
         sys.exit(1)
 
-def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, PkgSet]:
+def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int, PkgSet], PkgSet, Dict[int, int]]:
     """
     Parse the dpkg status file and collect:
     1. Strict dependencies (Depends, Pre-Depends)
     2. Recommended packages map: recommended package -> package that recommends it
     3. Recommender packages: package names that have a Recommends field
-    4. System packages: Essential: yes or Priority: required/important
+    4. Suggested packages map: suggested package -> package that suggests it
+    5. System packages: Essential: yes or Priority: required/important
+    6. Alternative dependencies: alternative package -> package that depends on it
     """
     strict_deps: PkgSet = PkgSet()
     recommends_deps: Dict[int, PkgSet] = {}
     recommender_packages: PkgSet = PkgSet()
+    suggests_deps: Dict[int, PkgSet] = {}
     system_packages: PkgSet = PkgSet()
+    alternative_deps: Dict[int, int] = {}
     current_package: str | None = None
 
     try:
@@ -219,6 +227,11 @@ def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int,
                             )
                             if all(pkg in installed_packages for pkg in alternatives):
                                 strict_deps.update(alternatives)
+                            else:
+                                for alt in alternatives:
+                                    alt_id = _pkg_context.get_id(alt)
+                                    alternative_deps[alt_id] = _pkg_context.get_id(current_package)
+
 
                 elif field is _StatusField.RECOMMENDS:
                     recommender_packages.add(current_package)
@@ -228,6 +241,14 @@ def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int,
                             continue
                         name = dep.partition(' ')[0]
                         recommends_deps.setdefault(_pkg_context.get_id(name), PkgSet()).add(current_package)
+
+                elif field is _StatusField.SUGGESTS:
+                    for dep in re.split(r'[,|]', value):
+                        dep = dep.strip()
+                        if not dep:
+                            continue
+                        name = dep.partition(' ')[0]
+                        suggests_deps.setdefault(_pkg_context.get_id(name), PkgSet()).add(current_package)
 
                 elif field is _StatusField.ESSENTIAL:
                     if value == 'yes':
@@ -240,18 +261,35 @@ def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int,
     except FileNotFoundError:
         print("Error: Could not find /var/lib/dpkg/status.", file=sys.stderr)
 
-    return strict_deps, recommends_deps, recommender_packages, system_packages
+    return strict_deps, recommends_deps, recommender_packages, suggests_deps, system_packages, alternative_deps
 
-def format_pkg_output(pkg_name: str, clean_recommends: Dict[int, PkgSet]) -> str:
-    """Color the package name green and list its recommenders if it is recommended."""
+def format_pkg_output(pkg_name: str, clean_recommends: Dict[int, PkgSet], clean_suggests: Dict[int, PkgSet], alternative_deps: Dict[int, int]) -> str:
+    """Color packages: red if alternative dependency, green if recommended, yellow if suggested.
+    Priority: red > green > yellow
+    """
     pkg_id = _pkg_context.name_to_id.get(pkg_name)
     if pkg_id is None:
         return pkg_name
+
+    # Alternative dependencies take precedence (highest priority)
+    depender_id = alternative_deps.get(pkg_id)
+    if depender_id is not None:
+        depender_name = _pkg_context.get_name(depender_id)
+        return f"{COLOR_RED}{pkg_name}{COLOR_RESET}  <|  [{depender_name}]"
+    
+    # Check recommended (green) - higher priority than suggested
     recommenders = clean_recommends.get(pkg_id)
-    if not recommenders:
-        return pkg_name
-    recommender_list = ', '.join(sorted(recommenders.names()))
-    return f"{COLOR_GREEN}{pkg_name}{COLOR_RESET}  <-  [{recommender_list}]"
+    if recommenders:
+        recommender_list = ', '.join(sorted(recommenders.names()))
+        return f"{COLOR_GREEN}{pkg_name}{COLOR_RESET}  <-  [{recommender_list}]"
+    
+    # Check suggested (yellow) - lower priority
+    suggesters = clean_suggests.get(pkg_id)
+    if suggesters:
+        suggester_list = ', '.join(sorted(suggesters.names()))
+        return f"{COLOR_YELLOW}{pkg_name}{COLOR_RESET}  <~  [{suggester_list}]"
+    
+    return pkg_name
 
 def load_snapshot(snapshot_name):
     """Load a snapshot file by name and return it as a PkgSet of package names."""
@@ -264,9 +302,9 @@ def load_snapshot(snapshot_name):
 
 def print_legend() -> None:
     """Print the color legend for package output."""
-    print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages recommended by other packages.\n")
+    print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} = recommended, {COLOR_YELLOW}yellow{COLOR_RESET} = suggested, {COLOR_RED}red{COLOR_RESET} = alternative dependency (required by shown package)\n")
 
-def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends: Dict[int, PkgSet], removed_label):
+def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends: Dict[int, PkgSet], clean_suggests: Dict[int, PkgSet], alternative_deps: Dict[int, int], removed_label):
     """Print a formatted package diff report used by both diff modes."""
     print(header)
     print_legend()
@@ -274,7 +312,7 @@ def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends: Dict[int,
     if new_pkgs:
         print(f"New peak packages ({len(new_pkgs)}):")
         for p in new_pkgs:
-            print(f"  + {format_pkg_output(p, clean_recommends)}")
+            print(f"  + {format_pkg_output(p, clean_recommends, clean_suggests, alternative_deps)}")
     if rem_pkgs:
         print(f"\n{removed_label} ({len(rem_pkgs)}):")
         for p in rem_pkgs:
@@ -472,12 +510,13 @@ def main():
     # 1. Collect data
     manual_packages = get_manual_packages()
     installed_packages = get_installed_packages()
-    strict_deps, recommends_deps, recommender_packages, system_packages = get_dependencies_data(installed_packages)
+    strict_deps, recommends_deps, recommender_packages, suggests_deps, system_packages, alternative_deps = get_dependencies_data(installed_packages)
 
     # 2. Set operations
     current_peak_packages = manual_packages - strict_deps - system_packages
     clean_recommenders = recommender_packages - strict_deps - system_packages
     clean_recommends = recommends_deps
+    clean_suggests = suggests_deps
     if args.filter_non_peak_recommended:
         non_peak_recommends = collect_non_peak_recommended(clean_recommends, clean_recommenders)
         current_peak_packages -= non_peak_recommends
@@ -494,7 +533,7 @@ def main():
         print(f"--- Installed Peak packages ({len(current_peak_packages)} total) ---")
         print_legend()
         for pkg in sorted(current_peak_packages.names()):
-            print(f"  * {format_pkg_output(pkg, clean_recommends)}")
+            print(f"  * {format_pkg_output(pkg, clean_recommends, clean_suggests, alternative_deps)}")
         return
 
     # --- SAVE SNAPSHOT ---
@@ -526,6 +565,8 @@ def main():
             new_pkgs,
             rem_pkgs,
             clean_recommends,
+            clean_suggests,
+            alternative_deps,
             "Missing (removed) peak packages",
         )
 
@@ -545,6 +586,8 @@ def main():
             new_pkgs,
             rem_pkgs,
             clean_recommends,
+            clean_suggests,
+            alternative_deps,
             "Removed peak packages",
         )
 
