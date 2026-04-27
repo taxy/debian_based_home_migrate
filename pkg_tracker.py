@@ -215,10 +215,14 @@ def load_snapshot(snapshot_name):
     with open(file_path, 'r') as f:
         return PkgSet(f.read().splitlines())
 
+def print_legend() -> None:
+    """Print the color legend for package output."""
+    print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages recommended by other packages.\n")
+
 def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends, removed_label):
     """Print a formatted package diff report used by both diff modes."""
     print(header)
-    print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages were likely installed as recommendations.\n")
+    print_legend()
 
     if new_pkgs:
         print(f"New peak packages ({len(new_pkgs)}):")
@@ -298,15 +302,50 @@ def build_recommend_circle_data(
     circles, singles = find_recommend_circles(recommends_deps, leaf_pkgs)
     return leaf_pkgs, circles, singles
 
-def collect_non_peak(
-    circle_data: Tuple[PkgSet, List[PkgSet], PkgSet]) -> PkgSet:
-    """Collect non-peak packages from circles that contain at least one peak package."""
-    non_peak_packages: PkgSet = PkgSet()
-    leaf_pkgs, circles, singles = circle_data
-    for circle in circles:
-        non_peak_packages.update(circle & leaf_pkgs)
-    non_peak_packages.update(singles)
-    return non_peak_packages
+def get_pulled_in_from_leaves(
+    recommends_deps: Dict[int, PkgSet], 
+    leaf_pkgs: PkgSet
+) -> PkgSet:
+    """
+    Traverse the recommendation graph upward from the leaves.
+    Add every touched package to the pulled_in set,
+    EXCEPT the top-level packages that are not recommended by anything.
+    """
+    pulled_in = PkgSet()
+    visited = PkgSet(leaf_pkgs)
+    queue: deque[int] = deque(leaf_pkgs)
+
+    while queue:
+        curr = queue.popleft()
+        
+        # Which packages RECOMMEND curr? (Upward edges / parents)
+        parents = recommends_deps.get(curr, PkgSet())
+
+        # If it HAS parents (so something pulls it in), it is NOT a top package.
+        # Add it to the removable set, including leaves that also have parents.
+        if parents:
+            pulled_in.add(curr)
+        # If it has NO parents (parents is empty), then it is a TOP package.
+        # Do not add it to pulled_in, so it remains among the peak packages.
+
+        # Continue the traversal upward through the parents
+        for parent in parents:
+            if parent not in visited:
+                visited.add(parent)
+                queue.append(parent)
+
+    return pulled_in
+
+def collect_non_peak_recommended(
+    recommends_deps: Dict[int, PkgSet], clean_recommenders: PkgSet
+) -> Tuple[PkgSet, List[PkgSet], PkgSet]:
+    """Collect non-peak packages but recommended."""
+    leaf_pkgs = leaf_recommended_packages(recommends_deps, clean_recommenders)
+    
+    return  get_pulled_in_from_leaves(
+        recommends_deps,
+        leaf_pkgs,
+    )
 
 def print_recommend_circles(
     recommends_deps: Dict[int, PkgSet],
@@ -370,10 +409,10 @@ def main():
         help="In default listing mode, also print connected recommendation groups.",
     )
     parser.add_argument(
-        "--filter-recommend-circles",
+        "--filter-non-peak-recommended",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Exclude packages that belong to recommendation circles (disable with --no-filter-recommend-circles).",
+        help="Exclude packages that are recommended but not peak (disable with --no-filter-non-peak-recommended).",
     )
     parser.add_argument(
         "name",
@@ -397,23 +436,21 @@ def main():
         if pkg_id not in strict_deps and (recommenders - strict_deps)
     }
     clean_recommended_targets = PkgSet(clean_recommends)
-    circle_data = None
-    if args.print_recommend_circles or args.filter_recommend_circles:
-        circle_data = build_recommend_circle_data(clean_recommends, clean_recommenders)
-    if args.filter_recommend_circles:
-        non_peak_from_circles = collect_non_peak(circle_data) # type: ignore
-        current_peak_packages -= non_peak_from_circles
+    if args.filter_non_peak_recommended:
+        non_peak_recommends = collect_non_peak_recommended(clean_recommends, clean_recommenders)
+        current_peak_packages -= non_peak_recommends
 
     # --- LISTING (default mode) ---
     if not args.create and not args.diff and not args.base and not args.name:
         if args.print_recommend_circles:
+            circle_data = build_recommend_circle_data(clean_recommends, clean_recommenders)
             print_recommend_circles(
                 clean_recommends,
-                circle_data, # type: ignore
+                circle_data,
             )
             print()
         print(f"--- Installed Peak packages ({len(current_peak_packages)} total) ---")
-        print(f"Legend: {COLOR_GREEN}green{COLOR_RESET} packages were likely installed as recommendations.\n")
+        print_legend()
         for pkg in sorted(current_peak_packages.names()):
             print(f"  * {format_pkg_output(pkg, clean_recommended_targets)}")
         return
