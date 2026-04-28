@@ -433,11 +433,8 @@ def main():
 
     # 2. Set operations
     current_peak_packages = manual_packages - strict_deps - system_packages
-    clean_recommenders = recommender_packages - strict_deps - system_packages
-    clean_recommends = recommends_deps
-    clean_suggests = suggests_deps
     if args.filter_non_peak_recommended:
-        non_peak_recommends = collect_non_peak_recommended(clean_recommends, clean_recommenders)
+        non_peak_recommends = collect_non_peak_recommended(recommends_deps, recommender_packages)
         current_peak_packages -= non_peak_recommends
 
     # --- LISTING (default mode) ---
@@ -445,7 +442,7 @@ def main():
         print(f"--- Installed Peak packages ({len(current_peak_packages)} total) ---")
         print_legend()
         for pkg in sorted(current_peak_packages.names()):
-            print(f"  * {format_pkg_output(pkg, clean_recommends, clean_suggests, alternative_deps)}")
+            print(f"  * {format_pkg_output(pkg, recommends_deps, suggests_deps, alternative_deps)}")
         return
 
     # --- SAVE SNAPSHOT ---
@@ -467,7 +464,6 @@ def main():
         if target_set is None:
             return
 
-  
         new_set = current_peak_packages - target_set
         rem_set = (target_set - base_set) - installed_packages
         new_pkgs = sorted(new_set.names())
@@ -476,8 +472,8 @@ def main():
             f"--- Changes since [{target_name}] (base system filter: [{base_name}]) ---",
             new_pkgs,
             rem_pkgs,
-            clean_recommends,
-            clean_suggests,
+            recommends_deps,
+            suggests_deps,
             alternative_deps,
             "Missing (removed) peak packages",
         )
@@ -497,8 +493,8 @@ def main():
             f"--- Changes since [{target_name}] ---",
             new_pkgs,
             rem_pkgs,
-            clean_recommends,
-            clean_suggests,
+            recommends_deps,
+            suggests_deps,
             alternative_deps,
             "Removed peak packages",
         )
