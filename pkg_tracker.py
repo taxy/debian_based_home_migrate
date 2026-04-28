@@ -17,8 +17,9 @@ class _StatusField(enum.IntEnum):
     PRE_DEPENDS = 2
     RECOMMENDS  = 3
     SUGGESTS    = 4
-    ESSENTIAL   = 5
-    PRIORITY    = 6
+    PROVIDES    = 5
+    ESSENTIAL   = 6
+    PRIORITY    = 7
 
 _STATUS_FIELD_MAP: Dict[str, _StatusField] = {
     'Package':     _StatusField.PACKAGE,
@@ -26,6 +27,7 @@ _STATUS_FIELD_MAP: Dict[str, _StatusField] = {
     'Pre-Depends': _StatusField.PRE_DEPENDS,
     'Recommends':  _StatusField.RECOMMENDS,
     'Suggests':    _StatusField.SUGGESTS,
+    'Provides':    _StatusField.PROVIDES,
     'Essential':   _StatusField.ESSENTIAL,
     'Priority':    _StatusField.PRIORITY,
 }
@@ -189,6 +191,9 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
     4. Suggested packages map: suggested package -> package that suggests it
     5. System packages: Essential: yes or Priority: required/important
     6. Alternative dependencies: alternative package -> package that depends on it
+
+    Provides aliases are collected internally and used to expand strict dependencies
+    to the real packages that satisfy virtual package names.
     """
     strict_deps: PkgSet = PkgSet()
     recommends_deps: Dict[int, PkgSet] = {}
@@ -196,6 +201,7 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
     suggests_deps: Dict[int, PkgSet] = {}
     system_packages: PkgSet = PkgSet()
     alternative_deps: Dict[int, int] = {}
+    provides_map: Dict[int, PkgSet] = {}
     current_package: str | None = None
 
     try:
@@ -247,6 +253,15 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
                         name = dep.partition(' ')[0]
                         suggests_deps.setdefault(_pkg_context.get_id(name), PkgSet()).add(current_package)
 
+                elif field is _StatusField.PROVIDES:
+                    real_pkg_id = _pkg_context.get_id(current_package)
+                    for provided in value.split(','):
+                        provided = provided.strip()
+                        if not provided:
+                            continue
+                        virtual_name = provided.partition(' ')[0]
+                        provides_map.setdefault(_pkg_context.get_id(virtual_name), PkgSet()).add(real_pkg_id)
+
                 elif field is _StatusField.ESSENTIAL:
                     if value == 'yes':
                         system_packages.add(current_package)
@@ -257,6 +272,11 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
 
     except FileNotFoundError:
         print("Error: Could not find /var/lib/dpkg/status.", file=sys.stderr)
+
+    for dep_id in tuple(strict_deps):
+        provided_by = provides_map.get(dep_id)
+        if provided_by:
+            strict_deps.update(provided_by)
 
     return strict_deps, recommends_deps, recommender_packages, suggests_deps, system_packages, alternative_deps
 
