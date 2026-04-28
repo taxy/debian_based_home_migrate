@@ -180,7 +180,7 @@ def get_installed_packages() -> PkgSet:
         print(f"Error while querying installed packages: {e}", file=sys.stderr)
         sys.exit(1)
 
-def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int, PkgSet], PkgSet, Dict[int, int]]:
+def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int, PkgSet], PkgSet, Dict[int, int]]:
     """
     Parse the dpkg status file and collect:
     1. Strict dependencies (Depends, Pre-Depends)
@@ -409,7 +409,7 @@ def main():
     # 1. Collect data
     manual_packages = get_manual_packages()
     installed_packages = get_installed_packages()
-    strict_deps, recommends_deps, recommender_packages, suggests_deps, system_packages, alternative_deps = get_dependencies_data(installed_packages)
+    strict_deps, recommends_deps, recommender_packages, suggests_deps, system_packages, alternative_deps = get_dependencies_data()
 
     # 2. Set operations
     current_peak_packages = manual_packages - strict_deps - system_packages
