@@ -182,7 +182,7 @@ def get_installed_packages() -> PkgSet:
         print(f"Error while querying installed packages: {e}", file=sys.stderr)
         sys.exit(1)
 
-def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int, PkgSet], PkgSet, Dict[int, int]]:
+def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int, PkgSet], PkgSet, PkgSet, Dict[int, int]]:
     """
     Parse the dpkg status file and collect:
     1. Strict dependencies (Depends, Pre-Depends)
@@ -199,6 +199,7 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
     recommends_deps: Dict[int, PkgSet] = {}
     recommender_packages: PkgSet = PkgSet()
     suggests_deps: Dict[int, PkgSet] = {}
+    suggester_packages: PkgSet = PkgSet()
     system_packages: PkgSet = PkgSet()
     alternative_deps: Dict[int, int] = {}
     provides_map: Dict[int, PkgSet] = {}
@@ -246,6 +247,7 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
                         recommends_deps.setdefault(_pkg_context.get_id(name), PkgSet()).add(current_package)
 
                 elif field is _StatusField.SUGGESTS:
+                    suggester_packages.add(current_package)
                     for dep in re.split(r'[,|]', value):
                         dep = dep.strip()
                         if not dep:
@@ -278,7 +280,7 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
         if provided_by:
             strict_deps.update(provided_by)
 
-    return strict_deps, recommends_deps, recommender_packages, suggests_deps, system_packages, alternative_deps
+    return strict_deps, recommends_deps, recommender_packages, suggests_deps, suggester_packages, system_packages, alternative_deps
 
 def format_pkg_output(pkg_name: str, clean_recommends: Dict[int, PkgSet], clean_suggests: Dict[int, PkgSet], alternative_deps: Dict[int, int]) -> str:
     """Color packages: red if alternative dependency, green if recommended, yellow if suggested.
@@ -338,11 +340,11 @@ def print_changes_report(header, new_pkgs, rem_pkgs, clean_recommends: Dict[int,
     if not new_pkgs and not rem_pkgs:
         print("No changes.")
 
-def leaf_recommended_packages(
-    recommends_deps: Dict[int, PkgSet], recommender_packages: PkgSet
+def leaf_packages(
+    reverse_deps: Dict[int, PkgSet], who_has_deps: PkgSet
 ) -> PkgSet:
-    """Keep only leaf recommended packages (recommended, but not recommenders)."""
-    return PkgSet(recommends_deps) - recommender_packages
+    """Keep only leaf packages (have dependencies, but are not depended upon)."""
+    return PkgSet(reverse_deps) - who_has_deps
 
 def get_pulled_in_from_leaves(
     recommends_deps: Dict[int, PkgSet], 
@@ -378,14 +380,14 @@ def get_pulled_in_from_leaves(
 
     return pulled_in
 
-def collect_non_peak_recommended(
-    recommends_deps: Dict[int, PkgSet], clean_recommenders: PkgSet
+def collect_non_peak(
+    reverse_deps: Dict[int, PkgSet], who_has_deps: PkgSet
 ) -> PkgSet:
     """Collect non-peak packages but recommended."""
-    leaf_pkgs = leaf_recommended_packages(recommends_deps, clean_recommenders)
+    leaf_pkgs = leaf_packages(reverse_deps, who_has_deps)
     
     return  get_pulled_in_from_leaves(
-        recommends_deps,
+        reverse_deps,
         leaf_pkgs,
     )
 
@@ -419,6 +421,12 @@ def main():
         help="Exclude packages that are recommended but not peak (disable with --no-filter-non-peak-recommended).",
     )
     parser.add_argument(
+        "--filter-non-peak-suggested",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Exclude packages that are suggested but not peak (enable with --filter-non-peak-suggested).",
+    )
+    parser.add_argument(
         "name",
         nargs="?",
         help="Optional snapshot name for plain diff mode (same as --diff NAME).",
@@ -429,13 +437,16 @@ def main():
     # 1. Collect data
     manual_packages = get_manual_packages()
     installed_packages = get_installed_packages()
-    strict_deps, recommends_deps, recommender_packages, suggests_deps, system_packages, alternative_deps = get_dependencies_data()
+    strict_deps, recommends_deps, recommender_packages, suggests_deps, suggester_packages, system_packages, alternative_deps = get_dependencies_data()
 
     # 2. Set operations
     current_peak_packages = manual_packages - strict_deps - system_packages
     if args.filter_non_peak_recommended:
-        non_peak_recommends = collect_non_peak_recommended(recommends_deps, recommender_packages)
+        non_peak_recommends = collect_non_peak(recommends_deps, recommender_packages)
         current_peak_packages -= non_peak_recommends
+    if args.filter_non_peak_suggested:
+        non_peak_suggests = collect_non_peak(suggests_deps, suggester_packages)
+        current_peak_packages -= non_peak_suggests
 
     # --- LISTING (default mode) ---
     if not args.create and not args.diff and not args.base and not args.name:
