@@ -2,11 +2,12 @@
 import argparse
 import enum
 import pathlib
+import shlex
 import subprocess
 import sys
 import re
 from collections import deque
-from typing import Dict, Tuple, List, Iterable, Iterator, cast
+from typing import Dict, Tuple, Iterable, Iterator, cast
 
 SNAPSHOT_DIR = pathlib.Path.home() / "package_snapshots"
 
@@ -56,6 +57,11 @@ class _PkgContext:
         return self.id_to_name[pkg_id]
 
 _pkg_context = _PkgContext()
+
+def run_logged_subprocess(command: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run subprocess command and print the command line for visibility."""
+    print(f"Running command: {shlex.join(command)}", file=sys.stderr)
+    return subprocess.run(command, capture_output=True, text=True, check=True)
 
 class PkgSet:
     """Set of package names using integer IDs internally for performance."""
@@ -157,7 +163,7 @@ class PkgSet:
 def get_manual_packages() -> PkgSet:
     """Get manually installed packages using apt-mark."""
     try:
-        result = subprocess.run(['apt-mark', 'showmanual'], capture_output=True, text=True, check=True)
+        result = run_logged_subprocess(['apt-mark', 'showmanual'])
         lines = result.stdout.splitlines()
         cleaned_packages = {line.partition(':')[0] for line in lines if line.strip()}
         return PkgSet(cleaned_packages)
@@ -168,12 +174,7 @@ def get_manual_packages() -> PkgSet:
 def get_installed_packages() -> PkgSet:
     """Get currently installed package names using dpkg-query."""
     try:
-        result = subprocess.run(
-            ['dpkg-query', '-W', '-f=${Package}\n'],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        result = run_logged_subprocess(['dpkg-query', '-W', '-f=${Package}\n'])
         return PkgSet(filter(None, result.stdout.split('\n')))
     except subprocess.CalledProcessError as e:
         print(f"Error while querying installed packages: {e}", file=sys.stderr)
@@ -327,66 +328,6 @@ def leaf_recommended_packages(
     """Keep only leaf recommended packages (recommended, but not recommenders)."""
     return PkgSet(recommends_deps) - recommender_packages
 
-def find_recommend_circles(
-    recommends_deps: Dict[int, PkgSet], leaf_pkgs: PkgSet
-) -> Tuple[List[PkgSet], PkgSet]:
-    """
-    Find connected circles among leaf packages.
-
-    Two leaf packages are connected when they share at least one recommender,
-    and circles are connected components in this graph.
-    """
-    if not leaf_pkgs:
-        return [], PkgSet()
-
-    recommender_to_leafs: Dict[int, PkgSet] = {}
-    for leaf_id in leaf_pkgs:
-        for recommender_id in recommends_deps.get(leaf_id, PkgSet()):
-            recommender_to_leafs.setdefault(recommender_id, PkgSet()).add(leaf_id)
-
-    adjacency: Dict[int, PkgSet] = {pkg_id: PkgSet() for pkg_id in leaf_pkgs}
-    for linked_leaf_ids in recommender_to_leafs.values():
-        if len(linked_leaf_ids) < 2:
-            continue
-        for leaf_id in linked_leaf_ids:
-            adjacency[leaf_id].update(linked_leaf_ids - PkgSet({leaf_id}))
-
-    visited: PkgSet = PkgSet()
-    circles: List[PkgSet] = []
-    singles: PkgSet = PkgSet()
-
-    for leaf_id in leaf_pkgs:
-        if leaf_id in visited:
-            continue
-
-        queue: deque[int] = deque([leaf_id])
-        component: PkgSet = PkgSet()
-        visited.add(leaf_id)
-
-        while queue:
-            cur = queue.popleft()
-            component.add(cur)
-            for nxt in adjacency[cur]:
-                if nxt not in visited:
-                    visited.add(nxt)
-                    queue.append(nxt)
-
-        if len(component) > 1:
-            circles.append(component)
-        else:
-            singles.update(component)
-
-    circles.sort(key=len, reverse=True)
-    return circles, singles
-
-def build_recommend_circle_data(
-    recommends_deps: Dict[int, PkgSet], clean_recommenders: PkgSet
-) -> Tuple[PkgSet, List[PkgSet], PkgSet]:
-    """Build leaf set and connected circles derived from cleaned recommend data."""
-    leaf_pkgs = leaf_recommended_packages(recommends_deps, clean_recommenders)
-    circles, singles = find_recommend_circles(recommends_deps, leaf_pkgs)
-    return leaf_pkgs, circles, singles
-
 def get_pulled_in_from_leaves(
     recommends_deps: Dict[int, PkgSet], 
     leaf_pkgs: PkgSet
@@ -423,7 +364,7 @@ def get_pulled_in_from_leaves(
 
 def collect_non_peak_recommended(
     recommends_deps: Dict[int, PkgSet], clean_recommenders: PkgSet
-) -> Tuple[PkgSet, List[PkgSet], PkgSet]:
+) -> PkgSet:
     """Collect non-peak packages but recommended."""
     leaf_pkgs = leaf_recommended_packages(recommends_deps, clean_recommenders)
     
@@ -431,38 +372,6 @@ def collect_non_peak_recommended(
         recommends_deps,
         leaf_pkgs,
     )
-
-def print_recommend_circles(
-    recommends_deps: Dict[int, PkgSet],
-    circle_data: Tuple[PkgSet, List[PkgSet], PkgSet],
-) -> None:
-    """Compute and display recommendation circles only for leaf packages."""
-    leaf_pkgs, circles, singles = circle_data
-
-
-    print("--- Recommend circles (leaf recommended packages only) ---")
-    print(f"Leaf set size: {len(leaf_pkgs)}")
-
-    if not circles:
-        print("No circles found.")
-    else:
-        print(f"Circles found: {len(circles)}")
-        for idx, circle in enumerate(circles, start=1):
-            print(f"\nCircle #{idx} ({len(circle)} leaf packages):")
-            for pkg in sorted(circle.names()):
-                pkg_id = _pkg_context.get_id(pkg)
-                recommenders = sorted(recommends_deps.get(pkg_id, PkgSet()).names())
-                preview = ', '.join(recommenders[:4])
-                suffix = " ..." if len(recommenders) > 4 else ""
-                print(f"  - {pkg}  <-  [{preview}{suffix}]")
-
-    if singles:
-        sorted_singles = sorted(singles.names())
-        print(f"\nUnlinked leaf packages ({len(singles)}):")
-        for pkg in sorted_singles[:50]:
-            print(f"  - {pkg}")
-        if len(singles) > 50:
-            print(f"  ... and {len(singles) - 50} more")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -486,12 +395,6 @@ def main():
         nargs=2,
         metavar=("BASE_NAME", "TARGET_NAME"),
         help="Compare current system against TARGET_NAME while ignoring packages present in BASE_NAME.",
-    )
-    parser.add_argument(
-        "--print-recommend-circles",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="In default listing mode, also print connected recommendation groups.",
     )
     parser.add_argument(
         "--filter-non-peak-recommended",
@@ -523,13 +426,6 @@ def main():
 
     # --- LISTING (default mode) ---
     if not args.create and not args.diff and not args.base and not args.name:
-        if args.print_recommend_circles:
-            circle_data = build_recommend_circle_data(clean_recommends, clean_recommenders)
-            print_recommend_circles(
-                clean_recommends,
-                circle_data,
-            )
-            print()
         print(f"--- Installed Peak packages ({len(current_peak_packages)} total) ---")
         print_legend()
         for pkg in sorted(current_peak_packages.names()):
