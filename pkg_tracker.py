@@ -219,19 +219,15 @@ def get_dependencies_data(installed_packages: PkgSet) -> Tuple[PkgSet, Dict[int,
                             continue
 
                         dep_alternatives = dep_group.split('|')
-                        if len(dep_alternatives) == 1:
-                            strict_deps.add(dep_group.partition(' ')[0])
-                        else:
+                        strict_deps.add(dep_alternatives[0].partition(' ')[0])
+                        if len(dep_alternatives) > 1:
                             alternatives = tuple(
                                 dep.strip().partition(' ')[0]
-                                for dep in dep_alternatives
+                                for dep in dep_alternatives[1:]
                             )
-                            if all(pkg in installed_packages for pkg in alternatives):
-                                strict_deps.update(alternatives)
-                            else:
-                                for alt in alternatives:
-                                    alt_id = _pkg_context.get_id(alt)
-                                    alternative_deps[alt_id] = _pkg_context.get_id(current_package)
+                            for alt in alternatives:
+                                alt_id = _pkg_context.get_id(alt)
+                                alternative_deps[alt_id] = _pkg_context.get_id(current_package)
 
 
                 elif field is _StatusField.RECOMMENDS:
