@@ -218,8 +218,12 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
 
                 if field is _StatusField.PACKAGE:
                     current_package = value
+                    continue
 
-                elif field is _StatusField.DEPENDS or field is _StatusField.PRE_DEPENDS:
+                if current_package is None:
+                    continue
+
+                if field is _StatusField.DEPENDS or field is _StatusField.PRE_DEPENDS:
                     for dep_group in value.split(','):
                         dep_group = dep_group.strip()
                         if not dep_group:
@@ -235,7 +239,6 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
                             for alt in alternatives:
                                 alt_id = _pkg_context.get_id(alt)
                                 alternative_deps[alt_id] = _pkg_context.get_id(current_package)
-
 
                 elif field is _StatusField.RECOMMENDS:
                     recommender_packages.add(current_package)
