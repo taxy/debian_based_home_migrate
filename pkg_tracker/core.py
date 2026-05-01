@@ -6,8 +6,10 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections import deque
-from typing import Dict, Iterable, Iterator, Tuple, cast
+from dataclasses import dataclass
+from typing import Dict, IO, Iterable, Iterator, Tuple, cast
 
 SNAPSHOT_DIR = pathlib.Path.home() / "package_snapshots"
 
@@ -59,10 +61,49 @@ class _PkgContext:
 _pkg_context = _PkgContext()
 
 
-def run_logged_subprocess(command: list[str]) -> subprocess.CompletedProcess[str]:
-    """Run subprocess command and print the command line for visibility."""
+@dataclass
+class LoggedProcess:
+    """Container for an async subprocess and its shared output file."""
+
+    process: subprocess.Popen[str]
+    output_file: IO[str]
+
+    def wait_until_stop(self) -> IO[str]:
+        """Wait for process completion and return output file rewound to start."""
+        return_code = self.process.wait()
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, self.process.args)
+        self.output_file.seek(0)
+        return self.output_file
+
+    def kill_if_running(self) -> None:
+        """Kill and reap the process if it is still running."""
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait()
+
+    def close(self) -> None:
+        """Close the output file owned by this process wrapper."""
+        self.output_file.close()
+
+
+def run_logged_subprocess(command: list[str]) -> LoggedProcess:
+    """Start subprocess asynchronously and stream combined output into /dev/shm."""
     print(f"Running command: {shlex.join(command)}", file=sys.stderr)
-    return subprocess.run(command, capture_output=True, text=True, check=True)
+    output_file = tempfile.NamedTemporaryFile(
+        mode="w+",
+        encoding="utf-8",
+        dir="/dev/shm",
+        prefix="pkg_tracker_",
+        suffix=".log",
+    )
+    process = subprocess.Popen(
+        command,
+        stdout=output_file,
+        stderr=output_file,
+        text=True,
+    )
+    return LoggedProcess(process=process, output_file=output_file)
 
 
 class PkgSet:
@@ -162,14 +203,40 @@ class PkgSet:
         """String representation."""
         return f"PkgSet({sorted(self.names())})"
 
+def launch_manual_packages_query() -> LoggedProcess:
+    """Launch asynchronous apt-mark query for manual packages."""
+    return run_logged_subprocess(["apt-mark", "showmanual"])
+
+
+def parse_manual_packages_output(logged_process: LoggedProcess) -> PkgSet:
+    """Wait for apt-mark completion and parse output into a PkgSet."""
+    try:
+        output_file = logged_process.wait_until_stop()
+        lines = output_file.read().splitlines()
+        cleaned_packages = {line.partition(":")[0] for line in lines if line.strip()}
+        return PkgSet(cleaned_packages)
+    finally:
+        logged_process.close()
+
+
+def launch_installed_packages_query() -> LoggedProcess:
+    """Launch asynchronous dpkg-query for installed packages."""
+    return run_logged_subprocess(["dpkg-query", "-W", "-f=${Package}\\n"])
+
+
+def parse_installed_packages_output(logged_process: LoggedProcess) -> PkgSet:
+    """Wait for dpkg-query completion and parse output into a PkgSet."""
+    try:
+        output_file = logged_process.wait_until_stop()
+        return PkgSet(filter(None, output_file.read().split("\n")))
+    finally:
+        logged_process.close()
 
 def get_manual_packages() -> PkgSet:
     """Get manually installed packages using apt-mark."""
     try:
-        result = run_logged_subprocess(["apt-mark", "showmanual"])
-        lines = result.stdout.splitlines()
-        cleaned_packages = {line.partition(":")[0] for line in lines if line.strip()}
-        return PkgSet(cleaned_packages)
+        logged_process = launch_manual_packages_query()
+        return parse_manual_packages_output(logged_process)
     except subprocess.CalledProcessError as error:
         print(f"Error while querying apt: {error}", file=sys.stderr)
         sys.exit(1)
@@ -178,8 +245,8 @@ def get_manual_packages() -> PkgSet:
 def get_installed_packages() -> PkgSet:
     """Get currently installed package names using dpkg-query."""
     try:
-        result = run_logged_subprocess(["dpkg-query", "-W", "-f=${Package}\\n"])
-        return PkgSet(filter(None, result.stdout.split("\n")))
+        logged_process = launch_installed_packages_query()
+        return parse_installed_packages_output(logged_process)
     except subprocess.CalledProcessError as error:
         print(f"Error while querying installed packages: {error}", file=sys.stderr)
         sys.exit(1)

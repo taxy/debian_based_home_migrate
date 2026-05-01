@@ -8,8 +8,10 @@ from .core import (
     _pkg_context,
     collect_non_peak,
     get_dependencies_data,
-    get_installed_packages,
-    get_manual_packages,
+    launch_manual_packages_query,
+    launch_installed_packages_query,
+    parse_manual_packages_output,
+    parse_installed_packages_output,
     load_snapshot,
 )
 
@@ -142,17 +144,26 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    manual_packages = get_manual_packages()
-    installed_packages = get_installed_packages()
-    (
-        strict_deps,
-        recommends_deps,
-        recommender_packages,
-        suggests_deps,
-        suggester_packages,
-        system_packages,
-        alternative_deps,
-    ) = get_dependencies_data()
+    manual_packages_process = launch_manual_packages_query()
+    installed_packages_process = launch_installed_packages_query()
+    try:
+        (
+            strict_deps,
+            recommends_deps,
+            recommender_packages,
+            suggests_deps,
+            suggester_packages,
+            system_packages,
+            alternative_deps,
+        ) = get_dependencies_data()
+        installed_packages = parse_installed_packages_output(installed_packages_process)
+        manual_packages = parse_manual_packages_output(manual_packages_process)
+    finally:
+        manual_packages_process.kill_if_running()
+        manual_packages_process.close()
+
+        installed_packages_process.kill_if_running()
+        installed_packages_process.close()
 
     current_peak_packages = manual_packages - strict_deps - system_packages
     if args.filter_non_peak_recommended:
