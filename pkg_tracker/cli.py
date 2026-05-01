@@ -5,9 +5,11 @@ import subprocess
 import sys
 from collections.abc import Iterable, Iterator
 from importlib import metadata
+from typing import Any, cast
 
 from .api import (
     PackageData,
+    SNAPSHOT_DIR,
     calculate_peak_packages,
     collect_package_data,
     compute_base_diff,
@@ -146,6 +148,19 @@ def print_pipe_output(package_names: Iterable[str], include_descriptions: bool) 
         print(name)
 
 
+def _snapshot_name_completer(prefix: str, **_: object) -> list[str]:
+    """Complete snapshot names from SNAPSHOT_DIR without the .txt suffix."""
+    if not SNAPSHOT_DIR.exists():
+        return []
+
+    names = {
+        path.stem
+        for path in SNAPSHOT_DIR.glob("*.txt")
+        if path.is_file() and path.stem.startswith(prefix)
+    }
+    return sorted(names)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -160,12 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="Save the current peak package set as snapshot NAME.",
     )
-    parser.add_argument(
+    diff_arg = parser.add_argument(
         "--diff",
         metavar="NAME",
         help="Compare the current system against snapshot NAME.",
     )
-    parser.add_argument(
+    base_arg = parser.add_argument(
         "--base",
         nargs=2,
         metavar=("BASE_NAME", "TARGET_NAME"),
@@ -204,11 +219,20 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {_get_cli_version()}",
         help="Show program version and exit.",
     )
-    parser.add_argument(
+    name_arg = parser.add_argument(
         "name",
         nargs="?",
         help="Optional snapshot name for plain diff mode (same as --diff NAME).",
     )
+
+    try:
+        import argcomplete
+        cast(Any, diff_arg).completer = _snapshot_name_completer
+        cast(Any, base_arg).completer = _snapshot_name_completer
+        cast(Any, name_arg).completer = _snapshot_name_completer
+        argcomplete.autocomplete(parser)
+    except ImportError:
+        pass
     return parser
 
 
