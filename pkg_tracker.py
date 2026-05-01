@@ -3,7 +3,7 @@
 Package tracker - main entry point.
 Delegates to CLI implementation while keeping backward compatibility.
 """
-from pkg_tracker_cli import main
+from pkg_tracker.cli import main
 
 if __name__ == "__main__":
     main()

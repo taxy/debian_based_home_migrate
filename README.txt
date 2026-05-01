@@ -8,9 +8,20 @@ On next system:
 $ sudo /bin/bash restore_home.sh backup_taxy_20260419_100000.tar.gz
 $ sudo /bin/bash install_pkg_tracker.sh
 $ mv ~/package_snapshots/base_install.txt ~/package_snapshots/prev_install.txt
-$ pkg_tracker --create base_install
+$ pkg-tracker --create base_install
 
-$ pkg_tracker --base prev_install prev_system
+$ pkg-tracker --base prev_install prev_system
 or
-$ pkg_tracker prev_system
+$ pkg-tracker prev_system
+
+
+Install from git:
+$ gh repo clone taxy/debian_based_home_migrate
+$ cd debian_based_home_migrate
+$ python3 -m pipx install .
+or for development:
+$ python3 -m pipx install -e .
+
+After installation the environment exposes this command:
+$ pkg-tracker --help
 
