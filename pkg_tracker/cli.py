@@ -24,6 +24,19 @@ COLOR_YELLOW = "\033[93m"
 COLOR_RESET = "\033[0m"
 
 
+class _DefaultsFormatter(argparse.RawDescriptionHelpFormatter):
+    """Show defaults only for BooleanOptionalAction flags, not for simple store_true/store_false or optional arguments."""
+    def _get_help_string(self, action):
+        help_text = action.help or ""
+        # Only add default for BooleanOptionalAction with non-None defaults
+        if (action.default not in (None, argparse.SUPPRESS)): 
+            if help_text:
+                help_text += f" (default: {action.default})"
+            else:
+                help_text = f"(default: {action.default})"
+        return help_text
+
+
 def _get_cli_version() -> str:
     """Return installed package version when available."""
     try:
@@ -138,7 +151,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Track manually installed (peak) packages, create snapshots, and compare package state over time."
-        )
+        ),
+        formatter_class=_DefaultsFormatter,
     )
 
     parser.add_argument(
@@ -162,7 +176,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--filter-non-peak-recommended",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Exclude packages that are recommended but not peak (disable with --no-filter-non-peak-recommended).",
+        help="Exclude packages that are recommended but not peak (disable with -n or --no-filter-non-peak-recommended).",
+    )
+    parser.add_argument(
+        "-n",
+        dest="filter_non_peak_recommended",
+        action="store_false",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "-s",
@@ -178,6 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show package descriptions",
     )
     parser.add_argument(
+        "-v",
         "--version",
         action="version",
         version=f"%(prog)s {_get_cli_version()}",
