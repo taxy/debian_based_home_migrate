@@ -418,16 +418,16 @@ def main():
         help="Compare current system against TARGET_NAME while ignoring packages present in BASE_NAME.",
     )
     parser.add_argument(
-        "--filter-non-peak-recommended",
+        "-r", "--filter-non-peak-recommended",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Exclude packages that are recommended but not peak (disable with --no-filter-non-peak-recommended).",
+        help="Exclude packages that are recommended but not peak (disable with --no-r or --no-filter-non-peak-recommended).",
     )
     parser.add_argument(
-        "--filter-non-peak-suggested",
+        "-s", "--filter-non-peak-suggested",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Exclude packages that are suggested but not peak (enable with --filter-non-peak-suggested).",
+        help="Exclude packages that are suggested but not peak (enable with -s or --filter-non-peak-suggested).",
     )
     parser.add_argument(
         "name",
