@@ -14,6 +14,14 @@ from typing import Dict, IO, Iterable, Iterator, Tuple, cast
 SNAPSHOT_DIR = pathlib.Path.home() / "package_snapshots"
 
 
+class SnapshotNotFoundError(Exception):
+    """Raised when a named snapshot file does not exist."""
+
+    def __init__(self, snapshot_name: str) -> None:
+        self.snapshot_name = snapshot_name
+        super().__init__(f"No snapshot named '{snapshot_name}'. Looked in: '{SNAPSHOT_DIR}'")
+
+
 class _StatusField(enum.IntEnum):
     PACKAGE = 0
     DEPENDS = 1
@@ -353,15 +361,15 @@ def get_dependencies_data() -> Tuple[PkgSet, Dict[int, PkgSet], PkgSet, Dict[int
     )
 
 
-def load_snapshot(snapshot_name: str) -> PkgSet | None:
-    """Load a snapshot file by name and return it as a PkgSet of package names."""
+def load_snapshot(snapshot_name: str) -> PkgSet:
+    """Load a snapshot file by name and return it as a PkgSet of package names.
+
+    Raises:
+        SnapshotNotFoundError: if the snapshot file does not exist.
+    """
     file_path = SNAPSHOT_DIR / f"{snapshot_name}.txt"
     if not file_path.exists():
-        print(
-            f"Error: No snapshot named '{snapshot_name}'. Looked in: '{SNAPSHOT_DIR}'",
-            file=sys.stderr,
-        )
-        return None
+        raise SnapshotNotFoundError(snapshot_name)
     with open(file_path, "r", encoding="utf-8") as snapshot_file:
         return PkgSet(snapshot_file.read().splitlines())
 
