@@ -5,10 +5,11 @@ import subprocess
 import sys
 from collections.abc import Iterable, Iterator
 from importlib import metadata
-from typing import Any, cast
+from typing import Any, Literal, TypedDict, cast
 
 from .api import (
     PackageData,
+    PkgSet,
     SNAPSHOT_DIR,
     calculate_peak_packages,
     collect_package_data,
@@ -24,6 +25,15 @@ COLOR_GREEN = "\033[92m"
 COLOR_RED = "\033[91m"
 COLOR_YELLOW = "\033[93m"
 COLOR_RESET = "\033[0m"
+
+
+class ChangesArgs(TypedDict):
+    """Argument bundle for print_changes and print_changes_tty."""
+    header: str
+    new_pkgs_arg: PkgSet
+    rem_pkgs_arg: PkgSet
+    pkg_data: PackageData
+    removed_label: str
 
 
 class _DefaultsFormatter(argparse.RawDescriptionHelpFormatter):
@@ -116,14 +126,16 @@ def print_legend() -> None:
     )
 
 
-def print_changes_report(
+def print_changes_tty(
     header: str,
-    new_pkgs: list[int],
-    rem_pkgs: list[int],
+    new_pkgs_arg: PkgSet,
+    rem_pkgs_arg: PkgSet,
     pkg_data: PackageData,
     removed_label: str,
 ) -> None:
     """Print a formatted package diff report used by both diff modes."""
+    new_pkgs : list[int] = new_pkgs_arg.sorted_by_name()
+    rem_pkgs : list[int] = rem_pkgs_arg.sorted_by_name()
     print(header)
     print_legend()
 
@@ -148,6 +160,24 @@ def print_pipe_output(package_names: Iterable[str], include_descriptions: bool) 
         print(name)
 
 
+def print_changes(
+    is_tty: bool,
+    include_descriptions: bool,
+    changes_args: ChangesArgs,
+    pipe_output_set: Literal["new", "removed"],
+) -> None:
+    """Print changes for terminal users or pipe-friendly output."""
+    if is_tty:
+        print_changes_tty(**changes_args)
+    else:
+        pkg_names = (
+            changes_args["new_pkgs_arg"].names()
+            if pipe_output_set == "new"
+            else changes_args["rem_pkgs_arg"].names()
+        )
+        print_pipe_output(sorted(pkg_names), include_descriptions)
+
+
 def _snapshot_name_completer(prefix: str, **_: object) -> list[str]:
     """Complete snapshot names from SNAPSHOT_DIR without the .txt suffix."""
     if not SNAPSHOT_DIR.exists():
@@ -166,6 +196,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Track manually installed (peak) packages, create snapshots, and compare package state over time."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  pkg-tracker\n"
+            "    Colored show peak packages on the current system\n"
+            "  pkg-tracker -d\n"
+            "    Show descriptions of peak packages on the current system\n"
+            "  pkg-tracker --create base_install\n"
+            "    Create a baseline snapshot from the current system\n"
+            "  pkg-tracker --base prev_install prev_system\n"
+            "    Compare against prev_system while filtering packages from prev_install\n"
+            "  pkg-tracker prev_system\n"
+            "    Compare snapshot prev_system with the current system\n"
+            "  pkg-tracker base_install -d\n"
+            "    To get descriptions of new packages\n"
+            "  pkg-tracker base_install -d --pipe-output-set removed\n"
+            "    To get descriptions of removed packages"
         ),
         formatter_class=_DefaultsFormatter,
     )
@@ -211,6 +258,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--descriptions",
         action="store_true",
         help="Show package descriptions",
+    )
+    parser.add_argument(
+        "--pipe-output-set",
+        choices=("new", "removed"),
+        default="new",
+        help="For non-TTY diff output, choose whether to print new or removed package names.",
     )
     parser.add_argument(
         "-v",
@@ -271,30 +324,36 @@ def main() -> None:
             base_name, target_name = args.base[0], args.base[1]
             new_set, rem_set = compute_base_diff(base_name, target_name,
                                                  current_peak_packages, pkg_data.installed_packages)
-            if is_tty:
-                print_changes_report(
-                    f"--- Changes since [{target_name}] (base system filter: [{base_name}]) ---",
-                    new_set.sorted_by_name(),
-                    rem_set.sorted_by_name(),
-                    pkg_data,
-                    "Missing (removed) peak packages"
-                )
-            else:
-                print_pipe_output(sorted(new_set.names()), args.descriptions)
+            changes_args: ChangesArgs = {
+                "header": f"--- Changes since [{target_name}] (base system filter: [{base_name}]) ---",
+                "new_pkgs_arg": new_set,
+                "rem_pkgs_arg": rem_set,
+                "pkg_data": pkg_data,
+                "removed_label": "Missing (removed) peak packages",
+            }
+            print_changes(
+                is_tty,
+                args.descriptions,
+                changes_args,
+                args.pipe_output_set,
+            )
             return
 
         target_name = args.diff if args.diff else args.name
         new_set, rem_set = compute_diff(target_name, current_peak_packages, pkg_data.installed_packages)
-        if is_tty:
-            print_changes_report(
-                f"--- Changes since [{target_name}] ---",
-                new_set.sorted_by_name(),
-                rem_set.sorted_by_name(),
-                pkg_data,
-                "Removed peak packages"
-            )
-        else:
-            print_pipe_output(sorted(new_set.names()), args.descriptions)
+        changes_args: ChangesArgs = {
+            "header": f"--- Changes since [{target_name}] ---",
+            "new_pkgs_arg": new_set,
+            "rem_pkgs_arg": rem_set,
+            "pkg_data": pkg_data,
+            "removed_label": "Removed peak packages",
+        }
+        print_changes(
+            is_tty,
+            args.descriptions,
+            changes_args,
+            args.pipe_output_set,
+        )
     except SnapshotNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
