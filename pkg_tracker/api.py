@@ -14,8 +14,13 @@ from .core import (
     parse_installed_packages_output,
     PkgSet,
     SNAPSHOT_DIR,
+    SnapshotNotFoundError,
+    _pkg_context
 )
 
+def get_pkg_name(int_id: int) -> str:
+    """Get package name for a given package ID."""
+    return _pkg_context.get_name(int_id)
 
 @dataclass
 class PackageData:

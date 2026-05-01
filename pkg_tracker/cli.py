@@ -10,12 +10,9 @@ from .api import (
     collect_package_data,
     compute_base_diff,
     compute_diff,
-    save_snapshot
-)
-
-from .core import (
-    _pkg_context,
+    save_snapshot,
     SnapshotNotFoundError,
+    get_pkg_name
 )
 
 
@@ -33,15 +30,15 @@ def _get_cli_version() -> str:
         return "dev"
 
 
-def format_pkg_output(pkg_name: str, pkg_data: PackageData) -> str:
+def format_pkg_output(pkg_id: int, pkg_data: PackageData) -> str:
     """Color packages based on why they appear in the report."""
-    pkg_id = _pkg_context.name_to_id.get(pkg_name)
-    if pkg_id is None:
-        return pkg_name
+    pkg_name = get_pkg_name(pkg_id)
+    if pkg_name is None:
+        return str(pkg_id)
 
     depender_id = pkg_data.alternative_deps.get(pkg_id)
     if depender_id is not None:
-        depender_name = _pkg_context.get_name(depender_id)
+        depender_name = get_pkg_name(depender_id)
         return f"{COLOR_RED}{pkg_name}{COLOR_RESET}  <|  [{depender_name}]"
 
     recommenders = pkg_data.recommends_deps.get(pkg_id)
@@ -68,8 +65,8 @@ def print_legend() -> None:
 
 def print_changes_report(
     header: str,
-    new_pkgs: list[str],
-    rem_pkgs: list[str],
+    new_pkgs: list[int],
+    rem_pkgs: list[int],
     pkg_data: PackageData,
     removed_label: str,
 ) -> None:
@@ -84,7 +81,7 @@ def print_changes_report(
     if rem_pkgs:
         print(f"\n{removed_label} ({len(rem_pkgs)}):")
         for pkg in rem_pkgs:
-            print(f"  - {pkg}")
+            print(f"  - {get_pkg_name(pkg)}")
 
     if not new_pkgs and not rem_pkgs:
         print("No changes.")
@@ -157,7 +154,7 @@ def main() -> None:
     if not args.create and not args.diff and not args.base and not args.name:
         print(f"--- Installed Peak packages ({len(current_peak_packages)} total) ---")
         print_legend()
-        for pkg in sorted(current_peak_packages.names()):
+        for pkg in current_peak_packages.sorted_by_name():
             print(f"  * {format_pkg_output(pkg, pkg_data)}")
         return
 
@@ -173,8 +170,8 @@ def main() -> None:
                                                  current_peak_packages, pkg_data.installed_packages)
             print_changes_report(
                 f"--- Changes since [{target_name}] (base system filter: [{base_name}]) ---",
-                sorted(new_set.names()),
-                sorted(rem_set.names()),
+                new_set.sorted_by_name(),
+                rem_set.sorted_by_name(),
                 pkg_data,
                 "Missing (removed) peak packages",
             )
@@ -184,8 +181,8 @@ def main() -> None:
         new_set, rem_set = compute_diff(target_name, current_peak_packages, pkg_data.installed_packages)
         print_changes_report(
             f"--- Changes since [{target_name}] ---",
-            sorted(new_set.names()),
-            sorted(rem_set.names()),
+            new_set.sorted_by_name(),
+            rem_set.sorted_by_name(),
             pkg_data,
             "Removed peak packages",
         )

@@ -174,6 +174,10 @@ class PkgSet:
         """Iterate over package names (strings)."""
         return (_pkg_context.get_name(pkg_id) for pkg_id in self._ids)
 
+    def sorted_by_name(self) -> list[int]:
+        """Return package IDs sorted by their corresponding names."""
+        return sorted(self._ids, key=lambda pkg_id: _pkg_context.get_name(pkg_id))
+
     def __len__(self) -> int:
         """Return number of packages in the set."""
         return len(self._ids)
