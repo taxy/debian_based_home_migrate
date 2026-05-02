@@ -14,7 +14,7 @@ $ /bin/bash migrate_home.sh /home/user
 On next system:
 # Restore the previously created backup archive.
 $ sudo /bin/bash restore_home.sh backup_taxy_20260419_100000.tar.gz
-# Install pkg-tracker and helper scripts on the new machine.
+# Install pkg-tracker on the new machine.
 $ sudo /bin/bash install_pkg_tracker.sh
 # Keep the old base snapshot as prev_install for base filtering.
 $ mv ~/package_snapshots/base_install.txt ~/package_snapshots/prev_install.txt
@@ -27,6 +27,11 @@ or
 # Quick compare against a named snapshot.
 $ pkg-tracker prev_system
 
+# Install missing packages which was preset in the prev_system
+$ sudo apt-get install $(pkg-tracker --base prev_install prev_system --pipe-output-set removed)
+
+# Restore state of fresh install
+$ sudo apt-get autoremove $(pkg-tracker base_install --pipe-output-set new)
 
 Install from git:
 # Clone the repository and enter it.
