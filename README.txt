@@ -1,6 +1,10 @@
 On previous system:
 # Remove any old snapshot with the same name to avoid stale comparisons.
 $ rm ~/package_snapshots/prev_install.txt
+
+# If old system python < 3.10:
+$ source  ./setup_python.sh 
+
 # Capture a snapshot of the current manually installed peak packages.
 $ python3 pkg_tracker.py --create prev_system
 Saved successfully: 365 packages recorded (/home/user/package_snapshots/prev_system.txt).

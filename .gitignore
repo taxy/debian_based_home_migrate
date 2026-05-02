@@ -37,3 +37,4 @@ logs/
 # Environment files
 .env
 .env.local
+python_portable
